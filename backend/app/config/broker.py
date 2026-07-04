@@ -22,6 +22,17 @@ class GrowwSettings(BaseConfig):
         description="Groww API secret. Optional until secret-based auth is used.",
     )
 
+    # Endpoint configuration. Kept here (not in code) so no URL is hardcoded in
+    # the provider and every deployment can point at its own gateway/mock.
+    base_url: str = Field(
+        default="https://api.groww.in",
+        description="Groww API base URL.",
+    )
+    api_version: str = Field(default="v1", description="Groww API version segment.")
+    timeout_seconds: float = Field(
+        default=10.0, gt=0, description="Per-request timeout in seconds."
+    )
+
     @property
     def is_configured(self) -> bool:
         """Return ``True`` when an API key has been provided."""
