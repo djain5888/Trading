@@ -1,0 +1,10 @@
+# Runtime dependencies. This file mirrors the [project.dependencies] block in
+# pyproject.toml for environments that prefer pip requirements files.
+#
+# For development, install the full toolchain with:
+#     pip install -e ".[dev]"
+
+fastapi>=0.115
+uvicorn[standard]>=0.32
+pydantic>=2.9
+pydantic-settings>=2.5
