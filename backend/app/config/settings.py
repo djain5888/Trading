@@ -1,77 +1,126 @@
-"""Application configuration.
+"""Aggregate application configuration.
 
-Settings are loaded from environment variables (and an optional ``.env``
-file) using ``pydantic-settings``. A cached accessor is exposed via
-:func:`get_settings` so the configuration is parsed only once per process.
+The top-level :class:`Settings` object composes the per-domain settings groups
+(database, cache, broker) into a single strongly typed, immutable, cached
+object. Configuration is read from the environment and an optional ``.env``
+file, validated on construction, and exposed through the cached
+:func:`get_settings` accessor so no global mutable state is required.
 """
 
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, model_validator
+from pydantic_settings import BaseSettings
 
-Environment = Literal["development", "staging", "production", "test"]
+from app.config.base import build_config
+from app.config.broker import GrowwSettings
+from app.config.database import DuckDBSettings, PostgresSettings, RedisSettings
+from app.config.environment import Environment
+
+#: Backwards-compatible alias. Prefer :class:`app.config.environment.Environment`.
+__all__ = ["Environment", "Settings", "get_settings"]
 
 
 class Settings(BaseSettings):
-    """Strongly-typed application settings.
+    """Root application settings.
 
-    Values are read from environment variables. Names are case-insensitive
-    and may optionally be prefixed with ``TITAN_``.
+    Reads unprefixed top-level variables (``APP_NAME``, ``ENVIRONMENT`` ...)
+    and delegates each infrastructure domain to a nested settings group that
+    owns its own environment-variable prefix.
     """
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        env_prefix="TITAN_",
-        case_sensitive=False,
-        extra="ignore",
-    )
+    model_config = build_config()
 
-    # Application metadata.
+    # --- Application metadata ---
     app_name: str = Field(default="Titan", description="Human-readable app name.")
     app_version: str = Field(default="0.1.0", description="Semantic version string.")
     environment: Environment = Field(
-        default="development",
+        default=Environment.DEVELOPMENT,
         description="Deployment environment the app is running in.",
     )
     debug: bool = Field(default=False, description="Enable verbose debug behaviour.")
 
-    # HTTP server.
-    host: str = Field(default="0.0.0.0", description="Bind host for the API server.")
-    port: int = Field(default=8000, description="Bind port for the API server.")
-    api_prefix: str = Field(default="/api/v1", description="Base path for the API.")
+    # --- Observability ---
+    log_level: str = Field(default="INFO", description="Root logging level.")
 
-    # CORS.
+    # --- HTTP server ---
+    host: str = Field(default="0.0.0.0", description="Bind host for the API server.")
+    port: int = Field(default=8000, ge=1, le=65535, description="API server port.")
+    api_prefix: str = Field(default="/api/v1", description="Base path for the API.")
     cors_origins: list[str] = Field(
         default_factory=lambda: ["*"],
         description="Origins allowed to make cross-origin requests.",
     )
 
-    # Persistence.
-    database_url: str = Field(
-        default="sqlite+aiosqlite:///./titan.db",
-        description="SQLAlchemy async database URL.",
-    )
-
-    # Observability.
-    log_level: str = Field(default="INFO", description="Root logging level.")
+    # --- Infrastructure groups ---
+    postgres: PostgresSettings = Field(default_factory=PostgresSettings)
+    redis: RedisSettings = Field(default_factory=RedisSettings)
+    duckdb: DuckDBSettings = Field(default_factory=DuckDBSettings)
+    groww: GrowwSettings = Field(default_factory=GrowwSettings)
 
     @property
     def is_production(self) -> bool:
         """Return ``True`` when running in the production environment."""
-        return self.environment == "production"
+        return self.environment is Environment.PRODUCTION
+
+    @property
+    def is_development(self) -> bool:
+        """Return ``True`` when running in the development environment."""
+        return self.environment is Environment.DEVELOPMENT
+
+    @property
+    def is_testing(self) -> bool:
+        """Return ``True`` when running in the testing environment."""
+        return self.environment is Environment.TESTING
+
+    @model_validator(mode="after")
+    def _validate_production_requirements(self) -> Settings:
+        """Fail fast when production is missing required secrets.
+
+        Development and testing run with safe local defaults, but production
+        must supply real credentials. Missing values raise a clear error at
+        construction time rather than surfacing as an obscure runtime failure.
+
+        Returns:
+            The validated settings instance.
+
+        Raises:
+            ValueError: If a required production value is unset.
+        """
+        if self.environment is not Environment.PRODUCTION:
+            return self
+
+        missing: list[str] = []
+        if not self.postgres.password:
+            missing.append("POSTGRES_PASSWORD")
+        if not self.groww.api_key:
+            missing.append("GROWW_API_KEY")
+
+        if missing:
+            raise ValueError(
+                "Missing required production configuration: "
+                + ", ".join(missing)
+                + ". Set these environment variables before starting Titan in "
+                "production."
+            )
+        return self
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """Return the cached application settings instance.
+    """Return the cached, validated application settings singleton.
 
-    Using an LRU cache guarantees a single parse of the environment per
-    process while remaining trivially overridable in tests via
+    The :func:`functools.lru_cache` decorator guarantees the environment is
+    parsed and validated exactly once per process while keeping the object
+    free of global mutable state. Tests may reset it with
     ``get_settings.cache_clear()``.
+
+    Returns:
+        The validated :class:`Settings` instance.
+
+    Raises:
+        pydantic.ValidationError: If configuration fails validation.
     """
     return Settings()
