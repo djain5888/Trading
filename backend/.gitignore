@@ -29,6 +29,8 @@ htmlcov/
 # Databases
 *.db
 *.sqlite3
+*.duckdb
+*.duckdb.wal
 
 # IDE / editor
 .idea/
