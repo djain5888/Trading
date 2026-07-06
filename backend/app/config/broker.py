@@ -30,7 +30,40 @@ class GrowwSettings(BaseConfig):
     )
     api_version: str = Field(default="v1", description="Groww API version segment.")
     timeout_seconds: float = Field(
-        default=10.0, gt=0, description="Per-request timeout in seconds."
+        default=10.0, gt=0, description="Per-request (read) timeout in seconds."
+    )
+    connect_timeout_seconds: float = Field(
+        default=5.0, gt=0, description="Connection-establishment timeout in seconds."
+    )
+
+    # Retry / backoff policy.
+    max_retries: int = Field(
+        default=3, ge=0, description="Retries after the first attempt."
+    )
+    backoff_base_seconds: float = Field(
+        default=0.5, gt=0, description="Initial exponential-backoff delay."
+    )
+    backoff_max_seconds: float = Field(
+        default=30.0, gt=0, description="Maximum backoff delay."
+    )
+
+    # Connection pool / keep-alive.
+    pool_max_connections: int = Field(
+        default=20, ge=1, description="Maximum total pooled connections."
+    )
+    pool_max_keepalive_connections: int = Field(
+        default=10, ge=1, description="Maximum idle keep-alive connections."
+    )
+    keepalive_expiry_seconds: float = Field(
+        default=30.0, gt=0, description="Idle keep-alive expiry in seconds."
+    )
+
+    # Session / token management.
+    default_token_ttl_seconds: float = Field(
+        default=3600.0, gt=0, description="Fallback access-token lifetime."
+    )
+    token_refresh_skew_seconds: float = Field(
+        default=60.0, ge=0, description="Refresh the token this early before expiry."
     )
 
     @property
