@@ -92,9 +92,15 @@ class _StubProvider(MarketDataProvider):
 class _FakeImportEngine(HistoricalImportEngine):
     """Import engine that seeds candles instead of calling a provider."""
 
-    def __init__(self, data_engine: HistoricalDataEngine, fail: bool = False) -> None:
+    def __init__(
+        self,
+        data_engine: HistoricalDataEngine,
+        fail: bool = False,
+        fail_symbols: frozenset[str] = frozenset(),
+    ) -> None:
         self._data_engine = data_engine
         self._fail = fail
+        self._fail_symbols = fail_symbols
 
     async def import_history(
         self,
@@ -109,6 +115,10 @@ class _FakeImportEngine(HistoricalImportEngine):
     ) -> ImportSummary:
         if self._fail:
             raise RuntimeError("provider unavailable")
+        if any(symbol in self._fail_symbols for symbol in symbols):
+            return ImportSummary(
+                symbols_processed=len(symbols), candles_imported=0, failed_requests=1
+            )
         imported = 0
         count = 260
         for symbol in symbols:
@@ -131,7 +141,9 @@ class _FakeImportEngine(HistoricalImportEngine):
         return ImportSummary(symbols_processed=len(symbols), candles_imported=imported)
 
 
-def _services(*, import_fail: bool = False) -> WorkflowServices:
+def _services(
+    *, import_fail: bool = False, fail_symbols: frozenset[str] = frozenset()
+) -> WorkflowServices:
     """Build a fully-faked service container."""
     clock = FakeClock(_OPEN)
     repo = InMemoryCandleRepository()
@@ -162,7 +174,9 @@ def _services(*, import_fail: bool = False) -> WorkflowServices:
         clock=clock,
         calendar=calendar,
         data_engine=data_engine,
-        import_engine=_FakeImportEngine(data_engine, fail=import_fail),
+        import_engine=_FakeImportEngine(
+            data_engine, fail=import_fail, fail_symbols=fail_symbols
+        ),
         indicator_engine=indicator_engine,
         scanner_engine=scanner_engine,
         provider=_StubProvider(),
@@ -189,6 +203,52 @@ async def test_morning_workflow_success() -> None:
     assert run.report.stocks_scanned == 2
     assert run.report.indicators_refreshed > 0
     assert run.report.market_open is True
+    assert run.report.imported_symbols == 2
+    assert run.report.failed_symbols == 0
+
+
+async def test_morning_report_surfaces_failed_symbols() -> None:
+    """A per-symbol import failure is counted and named in the report."""
+    engine = build_workflow_engine(services=_services(fail_symbols=frozenset({"BBB"})))
+    request = WorkflowRequest(
+        symbols=("AAA", "BBB"), interval=Interval.ONE_MINUTE, history_days=1
+    )
+    run = await engine.run("morning", request)
+
+    assert run.success
+    assert isinstance(run.report, MorningReport)
+    assert run.report.imported_symbols == 1
+    assert run.report.failed_symbols == 1
+    assert run.report.failed_symbol_names == ("BBB",)
+
+
+def test_render_morning_shows_import_counts() -> None:
+    """The terminal render surfaces imported/failed symbols and names."""
+    from app.cli.render import render_run
+    from app.workflow.models import StepResult, WorkflowRun
+
+    report = MorningReport(
+        market_open=True,
+        market_state="open",
+        stocks_scanned=2,
+        imported_symbols=1,
+        failed_symbols=1,
+        failed_symbol_names=("BBB",),
+        indicators_refreshed=3,
+        generated_at=_OPEN,
+    )
+    run = WorkflowRun(
+        workflow="morning",
+        success=True,
+        elapsed_seconds=0.1,
+        steps=(StepResult(name="x", ok=True, duration_seconds=0.0),),
+        error=None,
+        report=report,
+    )
+    text = render_run(run)
+    assert "Imported Symbols:    1" in text
+    assert "Failed Symbols:      1" in text
+    assert "Failed: BBB" in text
 
 
 async def test_morning_workflow_step_failure() -> None:

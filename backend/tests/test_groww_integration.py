@@ -207,6 +207,65 @@ async def test_partial_import_survives_bad_symbol() -> None:
     assert summary.failed_requests >= 1
 
 
+# -- 401 mid-run re-auth ---------------------------------------------------
+
+
+async def test_reauth_on_401_then_succeeds() -> None:
+    """A mid-run 401 triggers one token refresh and the retry succeeds."""
+    auth_calls = 0
+    data_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_calls, data_calls
+        if request.url.path.endswith("/auth/token"):
+            auth_calls += 1
+            return httpx.Response(
+                200, json={"access_token": f"tok-{auth_calls}", "expires_in": 3600}
+            )
+        data_calls += 1
+        # The first (stale) token is rejected; the refreshed token is accepted.
+        if request.headers["Authorization"] == "Bearer tok-1":
+            return httpx.Response(401, json={"error": "expired"})
+        return httpx.Response(
+            200, json={"symbol": "R", "last_price": "1", "timestamp": _END.isoformat()}
+        )
+
+    settings = _settings(totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+    provider = _provider(handler, settings)
+
+    quote = await provider.get_quote("R")
+
+    assert quote.symbol == "R"
+    assert auth_calls == 2  # initial + one re-auth
+    assert data_calls == 2  # 401 then success
+
+
+async def test_second_401_is_hard_auth_failure() -> None:
+    """A persistent 401 (even after re-auth) surfaces as AuthenticationError."""
+    auth_calls = 0
+    data_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_calls, data_calls
+        if request.url.path.endswith("/auth/token"):
+            auth_calls += 1
+            return httpx.Response(
+                200, json={"access_token": f"tok-{auth_calls}", "expires_in": 3600}
+            )
+        data_calls += 1
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    settings = _settings(totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+    provider = _provider(handler, settings)
+
+    from app.providers.exceptions import AuthenticationError
+
+    with pytest.raises(AuthenticationError):
+        await provider.get_quote("R")
+    assert auth_calls == 2  # exactly one re-auth attempt
+    assert data_calls == 2  # no infinite retry loop
+
+
 # -- DI backend selection --------------------------------------------------
 
 

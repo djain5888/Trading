@@ -23,11 +23,17 @@ from app.market.models import (
     SymbolSearchResponse,
 )
 from app.providers.base import MarketDataProvider
+from app.providers.exceptions import AuthenticationError
 from app.providers.groww import endpoints
 from app.providers.groww.http_client import GrowwHTTPClient, Sleeper
 from app.providers.groww.response_mapper import GrowwResponseMapper
 from app.providers.groww.session import GrowwSessionManager
 from app.providers.http import RequestSpec
+
+
+def _bearer(token: str) -> dict[str, str]:
+    """Return the Authorization header for a bearer token."""
+    return {"Authorization": f"Bearer {token}"}
 
 
 class GrowwMarketDataProvider(MarketDataProvider):
@@ -61,11 +67,22 @@ class GrowwMarketDataProvider(MarketDataProvider):
         self._mapper = mapper or GrowwResponseMapper()
 
     async def _send(self, spec: RequestSpec) -> dict[str, Any]:
-        """Authenticate and send a request, returning the JSON body."""
+        """Authenticate and send a request, re-authenticating once on 401.
+
+        A 401 mid-run usually means the access token expired; the token is
+        refreshed once and the request retried. A second 401 is a hard
+        authentication failure and propagates.
+
+        Raises:
+            AuthenticationError: If re-authentication also fails.
+        """
         token = await self._session.get_access_token()
-        return await self._http.request(
-            spec, extra_headers={"Authorization": f"Bearer {token}"}
-        )
+        try:
+            return await self._http.request(spec, extra_headers=_bearer(token))
+        except AuthenticationError:
+            self._session.invalidate()
+            token = await self._session.get_access_token()
+            return await self._http.request(spec, extra_headers=_bearer(token))
 
     async def get_market_status(
         self, exchange: Exchange = Exchange.NSE

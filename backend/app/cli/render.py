@@ -90,8 +90,12 @@ def _render_morning(report: MorningReport) -> list[str]:
         f"Market Status:       {'OPEN' if report.market_open else 'CLOSED'}",
         f"Market State:        {report.market_state}",
         f"Stocks Scanned:      {report.stocks_scanned}",
-        f"Indicators Refreshed:{report.indicators_refreshed}",
+        f"Imported Symbols:    {report.imported_symbols}",
+        f"Failed Symbols:      {report.failed_symbols}",
     ]
+    if report.failed_symbol_names:
+        lines.append(f"  Failed: {', '.join(report.failed_symbol_names)}")
+    lines.append(f"Indicators Refreshed:{report.indicators_refreshed}")
     if report.scanner_summary:
         lines.append("Scanner Results:")
         for name, count in sorted(report.scanner_summary.items()):

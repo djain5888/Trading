@@ -70,6 +70,14 @@ class GrowwSessionManager:
                 return self._token
             return await self._refresh()
 
+    def invalidate(self) -> None:
+        """Drop the cached token so the next call re-authenticates.
+
+        Used to recover from a mid-run 401 by forcing a single re-auth.
+        """
+        self._token = None
+        self._expires_at = None
+
     def _is_valid(self) -> bool:
         """Return whether the cached token is present and unexpired."""
         if self._token is None or self._expires_at is None:

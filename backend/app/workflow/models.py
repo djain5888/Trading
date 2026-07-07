@@ -80,6 +80,15 @@ class MorningReport(WorkflowReport):
     market_open: bool = Field(description="Whether the market is currently open.")
     market_state: str = Field(description="Current market state.")
     stocks_scanned: int = Field(ge=0, description="Number of symbols scanned.")
+    imported_symbols: int = Field(
+        default=0, ge=0, description="Symbols whose history imported cleanly."
+    )
+    failed_symbols: int = Field(
+        default=0, ge=0, description="Symbols whose history import failed."
+    )
+    failed_symbol_names: tuple[str, ...] = Field(
+        default_factory=tuple, description="Names of symbols that failed to import."
+    )
     indicators_refreshed: int = Field(ge=0, description="Indicator computations run.")
     scanner_summary: dict[str, int] = Field(
         default_factory=dict, description="Candidate count per scanner."

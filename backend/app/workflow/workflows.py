@@ -60,7 +60,7 @@ class MorningWorkflow(Workflow):
         state = await context.run_step(
             "Check market state", self._market_state(context)
         )
-        await context.run_step(
+        imported = await context.run_step(
             "Update historical candles", self._import(context, start, end)
         )
         refreshed = await context.run_step(
@@ -72,7 +72,7 @@ class MorningWorkflow(Workflow):
         ranked = await context.run_step("Rank results", self._rank(raw, request.top_n))
         return await context.run_step(
             "Generate report",
-            self._report(context, state, len(keys), refreshed, raw, ranked),
+            self._report(context, state, len(keys), imported, refreshed, raw, ranked),
         )
 
     async def _report(
@@ -80,6 +80,7 @@ class MorningWorkflow(Workflow):
         context: WorkflowContext,
         state: tuple[bool, str],
         stocks_scanned: int,
+        imported: tuple[list[str], list[str]],
         refreshed: int,
         raw: list[ScannerResult],
         ranked: list[ScannerResult],
@@ -87,10 +88,14 @@ class MorningWorkflow(Workflow):
         summary: dict[str, int] = {}
         for result in raw:
             summary[result.scanner_name] = summary.get(result.scanner_name, 0) + 1
+        imported_symbols, failed_symbols = imported
         return MorningReport(
             market_open=state[0],
             market_state=state[1],
             stocks_scanned=stocks_scanned,
+            imported_symbols=len(imported_symbols),
+            failed_symbols=len(failed_symbols),
+            failed_symbol_names=tuple(failed_symbols),
             indicators_refreshed=refreshed,
             scanner_summary=summary,
             top_results=tuple(ranked),
@@ -106,18 +111,31 @@ class MorningWorkflow(Workflow):
 
     async def _import(
         self, context: WorkflowContext, start: datetime, end: datetime
-    ) -> None:
+    ) -> tuple[list[str], list[str]]:
+        """Import each symbol independently, returning (imported, failed).
+
+        Symbols are imported one at a time so a per-symbol failure is isolated
+        and named. An authentication failure is not per-symbol recoverable and
+        propagates, aborting the workflow.
+        """
         request = context.request
-        if not request.symbols:
-            return
-        await context.services.import_engine.import_history(
-            list(request.symbols),
-            request.interval,
-            start,
-            end,
-            request.exchange,
-            mode=request.import_mode,
-        )
+        engine = context.services.import_engine
+        imported: list[str] = []
+        failed: list[str] = []
+        for symbol in request.symbols:
+            summary = await engine.import_history(
+                [symbol],
+                request.interval,
+                start,
+                end,
+                request.exchange,
+                mode=request.import_mode,
+            )
+            if summary.failed_requests > 0:
+                failed.append(symbol)
+            else:
+                imported.append(symbol)
+        return imported, failed
 
     async def _indicators(
         self,
