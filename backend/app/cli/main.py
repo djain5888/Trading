@@ -134,6 +134,23 @@ def scan(
 
 
 @app.command()
+def regime(
+    symbol: list[str] = typer.Option([], "--symbol", "-s", help="Watchlist symbol."),
+    exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
+    interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
+    history_days: int = typer.Option(500, help="Days of history to consider."),
+) -> None:
+    """Classify the market regime (trend, volatility and breadth)."""
+    request = WorkflowRequest(
+        symbols=tuple(symbol),
+        exchange=exchange,
+        interval=interval,
+        history_days=history_days,
+    )
+    _emit(_run_workflow("regime", request))
+
+
+@app.command()
 def collect(
     symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to collect."),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),

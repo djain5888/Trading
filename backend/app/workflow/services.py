@@ -27,6 +27,8 @@ from app.market.historical.importer.engine import HistoricalImportEngine
 from app.market.live.collector import LiveMarketCollector
 from app.market.live.dependencies import build_live_market_collector
 from app.market.live.models import CollectorConfig
+from app.market.regime.dependencies import get_market_regime_engine
+from app.market.regime.engine import MarketRegimeEngine
 from app.providers.base import MarketDataProvider
 from app.providers.dependencies import get_market_data_provider
 from app.scanner.dependencies import get_scanner_engine
@@ -46,6 +48,7 @@ class WorkflowServices:
     import_engine: HistoricalImportEngine
     indicator_engine: IndicatorEngine
     scanner_engine: ScannerEngine
+    regime_engine: MarketRegimeEngine
     provider: MarketDataProvider
     collector_factory: CollectorFactory
 
@@ -60,6 +63,7 @@ class WorkflowServices:
             import_engine=get_historical_import_engine(),
             indicator_engine=get_indicator_engine(),
             scanner_engine=get_scanner_engine(),
+            regime_engine=get_market_regime_engine(),
             provider=get_market_data_provider(),
             collector_factory=build_live_market_collector,
         )

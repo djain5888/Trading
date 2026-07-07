@@ -6,6 +6,7 @@ separate from the Typer commands so they are unit-testable.
 
 from __future__ import annotations
 
+from app.market.regime.models import RegimeReport
 from app.scanner.models import ScannerResult
 from app.workflow.diagnostics import HealthCheck, VersionInfo
 from app.workflow.models import (
@@ -13,6 +14,7 @@ from app.workflow.models import (
     ImportReport,
     IndicatorsReport,
     MorningReport,
+    RegimeWorkflowReport,
     ScanReport,
     WorkflowRun,
 )
@@ -70,6 +72,8 @@ def _render_report(report: object) -> list[str]:
             f"Candles imported:  {report.candles_imported}",
             f"Failed requests:   {report.failed_requests}",
         ]
+    if isinstance(report, RegimeWorkflowReport):
+        return _render_regime(report.regime)
     if isinstance(report, IndicatorsReport):
         return ["", f"Computed: {report.computed}  Skipped: {report.skipped}"]
     if isinstance(report, CollectReport):
@@ -92,6 +96,7 @@ def _render_morning(report: MorningReport) -> list[str]:
         f"Stocks Scanned:      {report.stocks_scanned}",
         f"Import:              {_format_import(report)}",
         f"Indicators Refreshed:{report.indicators_refreshed}",
+        f"Market Regime:       {_regime_summary(report.regime)}",
     ]
     if report.scanner_summary:
         lines.append("Scanner Results:")
@@ -100,6 +105,41 @@ def _render_morning(report: MorningReport) -> list[str]:
     lines.append(f"Top {len(report.top_results)} Ranked Stocks:")
     lines.extend(_render_results(report.top_results))
     lines.append(f"Generated At:        {report.generated_at.isoformat()}")
+    return lines
+
+
+def _regime_summary(report: RegimeReport | None) -> str:
+    """Format a one-line regime summary for the morning report."""
+    if report is None or not report.available or report.regime is None:
+        return "unavailable"
+    volatility = report.volatility.value if report.volatility else "?"
+    return (
+        f"{report.regime.value} (conf {report.confidence:.0f})  "
+        f"vol={volatility}  breadth={report.breadth:.0f}%"
+    )
+
+
+def _render_regime(report: RegimeReport) -> list[str]:
+    """Render a standalone market-regime report."""
+    lines = [
+        "",
+        "===== Titan Market Regime =====",
+        f"Index:      {report.index_symbol}",
+    ]
+    if not report.available or report.regime is None:
+        lines.append("Regime:     unavailable")
+        lines.append(f"Detail:     {report.detail}")
+    else:
+        volatility = report.volatility.value if report.volatility else "?"
+        lines.extend(
+            [
+                f"Regime:     {report.regime.value} "
+                f"(confidence {report.confidence:.0f})",
+                f"Volatility: {volatility}",
+                f"Breadth:    {report.breadth:.0f}% of watchlist above 50 EMA",
+            ]
+        )
+    lines.append(f"Generated:  {report.generated_at.isoformat()}")
     return lines
 
 
