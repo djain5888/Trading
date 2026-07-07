@@ -21,6 +21,10 @@ class GrowwSettings(BaseConfig):
         default=None,
         description="Groww API secret. Optional until secret-based auth is used.",
     )
+    totp_seed: str | None = Field(
+        default=None,
+        description="Base32 TOTP seed for API-key + TOTP auth. Never hardcode.",
+    )
 
     # Endpoint configuration. Kept here (not in code) so no URL is hardcoded in
     # the provider and every deployment can point at its own gateway/mock.
@@ -66,7 +70,19 @@ class GrowwSettings(BaseConfig):
         default=60.0, ge=0, description="Refresh the token this early before expiry."
     )
 
+    # Rate limiting. 0 disables throttling; otherwise cap outbound requests.
+    throttle_rate_per_second: float = Field(
+        default=0.0,
+        ge=0,
+        description="Max outbound requests per second (0 = unlimited).",
+    )
+
     @property
     def is_configured(self) -> bool:
         """Return ``True`` when an API key has been provided."""
         return bool(self.api_key)
+
+    @property
+    def uses_token_exchange(self) -> bool:
+        """Return whether auth requires a token exchange (secret or TOTP set)."""
+        return self.api_secret is not None or self.totp_seed is not None

@@ -10,6 +10,7 @@ file, validated on construction, and exposed through the cached
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
@@ -21,6 +22,9 @@ from app.config.environment import Environment
 
 #: Backwards-compatible alias. Prefer :class:`app.config.environment.Environment`.
 __all__ = ["Environment", "Settings", "get_settings"]
+
+#: Selectable market-data provider backends.
+MarketDataBackend = Literal["groww", "fake"]
 
 
 class Settings(BaseSettings):
@@ -52,6 +56,12 @@ class Settings(BaseSettings):
     cors_origins: list[str] = Field(
         default_factory=lambda: ["*"],
         description="Origins allowed to make cross-origin requests.",
+    )
+
+    # --- Providers ---
+    market_data_provider: MarketDataBackend = Field(
+        default="groww",
+        description="Market-data backend: 'groww' (real) or 'fake' (skeleton).",
     )
 
     # --- Infrastructure groups ---

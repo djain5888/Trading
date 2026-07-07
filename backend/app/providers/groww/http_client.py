@@ -9,6 +9,7 @@ and uses exponential backoff. Every HTTP failure is mapped to a domain
 from __future__ import annotations
 
 import asyncio
+import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -59,6 +60,9 @@ class GrowwHTTPClient:
         self._sleeper = sleeper or asyncio.sleep
         self._owns_client = client is None
         self._client = client or self._build_client(settings)
+        self._throttle_lock = asyncio.Lock()
+        self._last_request_monotonic: float | None = None
+        self._monotonic: Callable[[], float] = time.monotonic
 
     @staticmethod
     def _build_client(settings: GrowwSettings) -> httpx.AsyncClient:
@@ -96,6 +100,7 @@ class GrowwHTTPClient:
         headers = {**spec.headers, **(extra_headers or {})}
         attempt = 0
         while True:
+            await self._throttle()
             response, error, retryable, retry_after = await self._attempt(spec, headers)
             if response is not None:
                 return self._decode(response)
@@ -203,6 +208,21 @@ class GrowwHTTPClient:
             return min(retry_after, self._settings.backoff_max_seconds)
         delay = self._settings.backoff_base_seconds * float(2**attempt)
         return min(delay, self._settings.backoff_max_seconds)
+
+    async def _throttle(self) -> None:
+        """Space outbound requests to respect the configured rate limit."""
+        rate = self._settings.throttle_rate_per_second
+        if rate <= 0:
+            return
+        min_interval = 1.0 / rate
+        async with self._throttle_lock:
+            now = self._monotonic()
+            if self._last_request_monotonic is not None:
+                wait = min_interval - (now - self._last_request_monotonic)
+                if wait > 0:
+                    await self._sleeper(wait)
+                    now = self._monotonic()
+            self._last_request_monotonic = now
 
     async def aclose(self) -> None:
         """Close the client if it was created internally."""

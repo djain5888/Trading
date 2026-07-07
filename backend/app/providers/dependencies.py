@@ -1,8 +1,9 @@
 """Dependency-injection wiring for market-data providers.
 
 The rest of Titan asks for a :class:`MarketDataProvider` and never names a
-broker. Swapping providers is a single change here. The concrete provider is
-built from application settings and cached as a process singleton.
+broker. The concrete backend is chosen by ``market_data_provider`` in settings:
+``groww`` (the real HTTP provider, default) or ``fake`` (the offline skeleton,
+for tests/CI without credentials). Swapping backends is a single config change.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from functools import lru_cache
 
 from app.config.settings import Settings, get_settings
 from app.providers.base import MarketDataProvider
+from app.providers.groww.market_data_provider import GrowwMarketDataProvider
 from app.providers.groww.provider import GrowwProvider
 
 
@@ -21,10 +23,13 @@ def build_market_data_provider(settings: Settings | None = None) -> MarketDataPr
         settings: Application settings; defaults to the cached settings.
 
     Returns:
-        A concrete :class:`MarketDataProvider` implementation.
+        A concrete :class:`MarketDataProvider` implementation. ``groww`` builds
+        the real HTTP provider; ``fake`` builds the offline skeleton.
     """
     settings = settings or get_settings()
-    return GrowwProvider(settings=settings.groww)
+    if settings.market_data_provider == "fake":
+        return GrowwProvider(settings=settings.groww)
+    return GrowwMarketDataProvider(settings=settings.groww)
 
 
 @lru_cache(maxsize=1)

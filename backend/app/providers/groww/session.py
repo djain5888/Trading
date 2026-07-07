@@ -19,6 +19,7 @@ from app.core.logging import get_logger
 from app.providers.exceptions import AuthenticationError
 from app.providers.groww import endpoints
 from app.providers.groww.http_client import GrowwHTTPClient
+from app.providers.groww.totp import generate_totp
 from app.providers.http import HttpMethod, RequestSpec
 
 logger = get_logger(__name__)
@@ -60,7 +61,7 @@ class GrowwSessionManager:
         """
         if not self._settings.api_key:
             raise AuthenticationError("Groww API key is not configured.")
-        if self._settings.api_secret is None:
+        if not self._settings.uses_token_exchange:
             return self._settings.api_key
 
         async with self._lock:
@@ -77,14 +78,18 @@ class GrowwSessionManager:
         return self._clock.now() < self._expires_at - skew
 
     async def _refresh(self) -> str:
-        """Exchange credentials for a fresh access token."""
+        """Exchange credentials (API key + secret/TOTP) for an access token."""
+        body: dict[str, str] = {"key": self._settings.api_key}
+        if self._settings.api_secret is not None:
+            body["secret"] = self._settings.api_secret
+        if self._settings.totp_seed is not None:
+            body["totp"] = generate_totp(
+                self._settings.totp_seed, now=self._clock.now()
+            )
         spec = RequestSpec(
             method=HttpMethod.POST,
             path=endpoints.auth(self._settings.api_version),
-            json_body={
-                "key": self._settings.api_key,
-                "secret": self._settings.api_secret,
-            },
+            json_body=dict(body),
         )
         payload = await self._http.request(spec)
         token = _first_str(payload, _TOKEN_KEYS)
