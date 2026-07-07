@@ -12,6 +12,7 @@ from app.workflow.workflows import (
     IndicatorsWorkflow,
     MorningWorkflow,
     RegimeWorkflow,
+    RelativeStrengthWorkflow,
     ScanWorkflow,
     SectorWorkflow,
 )
@@ -55,5 +56,6 @@ def default_registry() -> WorkflowRegistry:
     registry.register("scan", ScanWorkflow)
     registry.register("regime", RegimeWorkflow)
     registry.register("sectors", SectorWorkflow)
+    registry.register("rs", RelativeStrengthWorkflow)
     registry.register("collect", CollectWorkflow)
     return registry

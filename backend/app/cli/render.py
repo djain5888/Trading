@@ -7,6 +7,7 @@ separate from the Typer commands so they are unit-testable.
 from __future__ import annotations
 
 from app.market.regime.models import RegimeReport
+from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
 from app.scanner.models import ScannerResult
 from app.workflow.diagnostics import HealthCheck, VersionInfo
@@ -16,6 +17,7 @@ from app.workflow.models import (
     IndicatorsReport,
     MorningReport,
     RegimeWorkflowReport,
+    RSWorkflowReport,
     ScanReport,
     SectorWorkflowReport,
     WorkflowRun,
@@ -78,6 +80,8 @@ def _render_report(report: object) -> list[str]:
         return _render_regime(report.regime)
     if isinstance(report, SectorWorkflowReport):
         return _render_sectors(report.sectors)
+    if isinstance(report, RSWorkflowReport):
+        return _render_rs(report.relative)
     if isinstance(report, IndicatorsReport):
         return ["", f"Computed: {report.computed}  Skipped: {report.skipped}"]
     if isinstance(report, CollectReport):
@@ -102,13 +106,14 @@ def _render_morning(report: MorningReport) -> list[str]:
         f"Indicators Refreshed:{report.indicators_refreshed}",
         f"Market Regime:       {_regime_summary(report.regime)}",
         f"Sector Strength:     {_sector_summary(report.sectors)}",
+        f"Relative Strength:   {_rs_summary(report.relative)}",
     ]
     if report.scanner_summary:
         lines.append("Scanner Results:")
         for name, count in sorted(report.scanner_summary.items()):
             lines.append(f"  {name}: {count}")
     lines.append(f"Top {len(report.top_results)} Ranked Stocks:")
-    lines.extend(_render_results(report.top_results))
+    lines.extend(_render_results(report.top_results, report.relative))
     lines.append(f"Generated At:        {report.generated_at.isoformat()}")
     return lines
 
@@ -192,14 +197,57 @@ def _format_import(report: MorningReport) -> str:
     return line
 
 
-def _render_results(results: tuple[ScannerResult, ...]) -> list[str]:
-    """Render a ranked list of scanner results."""
+def _render_results(
+    results: tuple[ScannerResult, ...], relative: RSReport | None = None
+) -> list[str]:
+    """Render a ranked list of scanner results, annotating RS when available."""
     if not results:
         return ["  (no candidates)"]
-    return [
-        f"  {index:>2}. {result.symbol:<12} "
-        f"score={result.score:6.1f} "
-        f"conf={result.confidence:.2f} "
-        f"[{result.scanner_name}]"
-        for index, result in enumerate(results, start=1)
-    ]
+    by_symbol = relative.by_symbol if relative and relative.available else {}
+    lines: list[str] = []
+    for index, result in enumerate(results, start=1):
+        entry = by_symbol.get(result.symbol)
+        rs = (
+            f" RS={entry.composite:.0f}{'*' if entry.leader else ''}"
+            if entry is not None
+            else ""
+        )
+        lines.append(
+            f"  {index:>2}. {result.symbol:<12} "
+            f"score={result.score:6.1f} "
+            f"conf={result.confidence:.2f} "
+            f"[{result.scanner_name}]{rs}"
+        )
+    return lines
+
+
+def _rs_summary(report: RSReport | None) -> str:
+    """Format a one-line relative-strength summary for the morning report."""
+    if report is None or not report.available:
+        return "unavailable"
+    market = "" if report.market_available else " (market neutral)"
+    if not report.leaders:
+        return f"no leaders{market}"
+    leaders = ", ".join(entry.symbol for entry in report.leaders[:5])
+    return f"{len(report.leaders)} leader(s): {leaders}{market}"
+
+
+def _render_rs(report: RSReport) -> list[str]:
+    """Render a standalone relative-strength report."""
+    lines = ["", "===== Titan Relative Strength ====="]
+    if not report.available:
+        lines.append("Relative Strength: unavailable")
+        lines.append(f"Detail:     {report.detail}")
+    else:
+        if not report.market_available:
+            lines.append("(NIFTY absent — vs-market component is neutral)")
+        for index, entry in enumerate(report.entries, start=1):
+            flag = " LEADER" if entry.leader else ""
+            lines.append(
+                f"  {index:>2}. {entry.symbol:<12} "
+                f"mkt={entry.rs_vs_market:5.1f} "
+                f"sec={entry.rs_vs_sector:5.1f} "
+                f"composite={entry.composite:5.1f}{flag}"
+            )
+    lines.append(f"Generated:  {report.generated_at.isoformat()}")
+    return lines

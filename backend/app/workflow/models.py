@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.market.enums import Exchange, Interval
 from app.market.historical.importer.models import ImportMode
 from app.market.regime.models import RegimeReport
+from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
 from app.scanner.models import ScannerResult
 
@@ -98,6 +99,9 @@ class MorningReport(WorkflowReport):
     sectors: SectorReport | None = Field(
         default=None, description="Sector-strength ranking, if produced."
     )
+    relative: RSReport | None = Field(
+        default=None, description="Relative-strength scoring, if produced."
+    )
     scanner_summary: dict[str, int] = Field(
         default_factory=dict, description="Candidate count per scanner."
     )
@@ -124,6 +128,12 @@ class SectorWorkflowReport(WorkflowReport):
     """Standalone sector-strength report for the ``sectors`` workflow."""
 
     sectors: SectorReport = Field(description="The sector-strength ranking.")
+
+
+class RSWorkflowReport(WorkflowReport):
+    """Standalone relative-strength report for the ``rs`` workflow."""
+
+    relative: RSReport = Field(description="The relative-strength scoring.")
 
 
 class ImportReport(WorkflowReport):

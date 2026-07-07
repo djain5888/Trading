@@ -29,6 +29,8 @@ from app.market.live.dependencies import build_live_market_collector
 from app.market.live.models import CollectorConfig
 from app.market.regime.dependencies import get_market_regime_engine
 from app.market.regime.engine import MarketRegimeEngine
+from app.market.relative.dependencies import get_relative_strength_engine
+from app.market.relative.engine import RelativeStrengthEngine
 from app.market.sector.dependencies import get_sector_strength_engine
 from app.market.sector.engine import SectorStrengthEngine
 from app.providers.base import MarketDataProvider
@@ -52,6 +54,7 @@ class WorkflowServices:
     scanner_engine: ScannerEngine
     regime_engine: MarketRegimeEngine
     sector_engine: SectorStrengthEngine
+    relative_engine: RelativeStrengthEngine
     provider: MarketDataProvider
     collector_factory: CollectorFactory
 
@@ -68,6 +71,7 @@ class WorkflowServices:
             scanner_engine=get_scanner_engine(),
             regime_engine=get_market_regime_engine(),
             sector_engine=get_sector_strength_engine(),
+            relative_engine=get_relative_strength_engine(),
             provider=get_market_data_provider(),
             collector_factory=build_live_market_collector,
         )

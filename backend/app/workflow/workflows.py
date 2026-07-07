@@ -13,6 +13,7 @@ from typing import ClassVar
 from app.market.historical.models import SeriesKey
 from app.market.live.models import CollectorConfig
 from app.market.regime.models import RegimeReport
+from app.market.relative.models import NEUTRAL_RS, RSReport
 from app.market.sector.models import SectorReport
 from app.scanner.engine import ScannerEngine
 from app.scanner.models import ScannerResult
@@ -24,6 +25,7 @@ from app.workflow.models import (
     IndicatorsReport,
     MorningReport,
     RegimeWorkflowReport,
+    RSWorkflowReport,
     ScanReport,
     SectorWorkflowReport,
 )
@@ -76,10 +78,15 @@ class MorningWorkflow(Workflow):
         sectors = await context.run_step(
             "Rank sector strength", self._sectors(context, end)
         )
+        relative = await context.run_step(
+            "Score relative strength", self._relative(context, end)
+        )
         raw = await context.run_step(
             "Run scanners", self._scan(context, keys, start, end)
         )
-        ranked = await context.run_step("Rank results", self._rank(raw, request.top_n))
+        ranked = await context.run_step(
+            "Rank results", self._rank(raw, request.top_n, relative)
+        )
         return await context.run_step(
             "Generate report",
             self._report(
@@ -90,6 +97,7 @@ class MorningWorkflow(Workflow):
                 refreshed,
                 regime,
                 sectors,
+                relative,
                 raw,
                 ranked,
             ),
@@ -104,6 +112,7 @@ class MorningWorkflow(Workflow):
         refreshed: int,
         regime: RegimeReport,
         sectors: SectorReport,
+        relative: RSReport,
         raw: list[ScannerResult],
         ranked: list[ScannerResult],
     ) -> MorningReport:
@@ -121,6 +130,7 @@ class MorningWorkflow(Workflow):
             indicators_refreshed=refreshed,
             regime=regime,
             sectors=sectors,
+            relative=relative,
             scanner_summary=summary,
             top_results=tuple(ranked),
             generated_at=context.services.clock.now(),
@@ -140,6 +150,16 @@ class MorningWorkflow(Workflow):
         """Rank sector strength; degrades gracefully without metadata."""
         request = context.request
         return await context.services.sector_engine.analyze(
+            request.symbols,
+            exchange=request.exchange,
+            interval=request.interval,
+            end=end,
+        )
+
+    async def _relative(self, context: WorkflowContext, end: datetime) -> RSReport:
+        """Score relative strength; degrades to neutral without index/sector."""
+        request = context.request
+        return await context.services.relative_engine.analyze(
             request.symbols,
             exchange=request.exchange,
             interval=request.interval,
@@ -215,8 +235,28 @@ class MorningWorkflow(Workflow):
         )
         return await engine.scan(scanners, keys, start, end, dedupe=False)
 
-    async def _rank(self, raw: list[ScannerResult], top_n: int) -> list[ScannerResult]:
-        return ScannerEngine.rank(raw, dedupe=True)[:top_n]
+    async def _rank(
+        self, raw: list[ScannerResult], top_n: int, relative: RSReport
+    ) -> list[ScannerResult]:
+        """Rank scanner results, using relative strength as a ranking input.
+
+        Scanner logic is untouched: the deduped scanner ranking is re-ordered so
+        leaders float up and a symbol's composite relative strength blends into
+        the score. Symbols without an RS score fall back to neutral.
+        """
+        ranked = ScannerEngine.rank(raw, dedupe=True)
+        if not relative.available:
+            return ranked[:top_n]
+        by_symbol = relative.by_symbol
+
+        def key(result: ScannerResult) -> tuple[int, float, float]:
+            entry = by_symbol.get(result.symbol)
+            composite = entry.composite if entry is not None else NEUTRAL_RS
+            leader = 1 if entry is not None and entry.leader else 0
+            blended = 0.6 * result.score + 0.4 * composite
+            return leader, blended, result.confidence
+
+        return sorted(ranked, key=key, reverse=True)[:top_n]
 
 
 class ImportWorkflow(Workflow):
@@ -364,6 +404,30 @@ class SectorWorkflow(Workflow):
             ),
         )
         return SectorWorkflowReport(sectors=report)
+
+
+class RelativeStrengthWorkflow(Workflow):
+    """Scores relative strength across the watchlist."""
+
+    name: ClassVar[str] = "rs"
+
+    async def run(self, context: WorkflowContext) -> RSWorkflowReport:
+        """Score relative strength and wrap it in a workflow report."""
+        services = context.services
+        request = context.request
+        _, end = _resolve_range(
+            services, request.start, request.end, request.history_days
+        )
+        report = await context.run_step(
+            "Score relative strength",
+            services.relative_engine.analyze(
+                request.symbols,
+                exchange=request.exchange,
+                interval=request.interval,
+                end=end,
+            ),
+        )
+        return RSWorkflowReport(relative=report)
 
 
 class CollectWorkflow(Workflow):
