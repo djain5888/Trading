@@ -80,7 +80,10 @@ class GrowwMarketDataProvider(MarketDataProvider):
         try:
             return await self._http.request(spec, extra_headers=_bearer(token))
         except AuthenticationError:
-            self._session.invalidate()
+            # Drop only the token that failed; a concurrent caller may already
+            # have refreshed it, so re-auth stays single-flight (no double
+            # refresh). A second 401 on the fresh token propagates as hard.
+            self._session.invalidate(token)
             token = await self._session.get_access_token()
             return await self._http.request(spec, extra_headers=_bearer(token))
 

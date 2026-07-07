@@ -97,10 +97,12 @@ class _FakeImportEngine(HistoricalImportEngine):
         data_engine: HistoricalDataEngine,
         fail: bool = False,
         fail_symbols: frozenset[str] = frozenset(),
+        auth_fail: bool = False,
     ) -> None:
         self._data_engine = data_engine
         self._fail = fail
         self._fail_symbols = fail_symbols
+        self._auth_fail = auth_fail
 
     async def import_history(
         self,
@@ -113,6 +115,10 @@ class _FakeImportEngine(HistoricalImportEngine):
         mode: object = None,
         on_progress: object = None,
     ) -> ImportSummary:
+        if self._auth_fail:
+            from app.providers.exceptions import AuthenticationError
+
+            raise AuthenticationError("Groww rejected credentials.")
         if self._fail:
             raise RuntimeError("provider unavailable")
         if any(symbol in self._fail_symbols for symbol in symbols):
@@ -142,7 +148,10 @@ class _FakeImportEngine(HistoricalImportEngine):
 
 
 def _services(
-    *, import_fail: bool = False, fail_symbols: frozenset[str] = frozenset()
+    *,
+    import_fail: bool = False,
+    fail_symbols: frozenset[str] = frozenset(),
+    auth_fail: bool = False,
 ) -> WorkflowServices:
     """Build a fully-faked service container."""
     clock = FakeClock(_OPEN)
@@ -175,7 +184,10 @@ def _services(
         calendar=calendar,
         data_engine=data_engine,
         import_engine=_FakeImportEngine(
-            data_engine, fail=import_fail, fail_symbols=fail_symbols
+            data_engine,
+            fail=import_fail,
+            fail_symbols=fail_symbols,
+            auth_fail=auth_fail,
         ),
         indicator_engine=indicator_engine,
         scanner_engine=scanner_engine,
@@ -222,6 +234,19 @@ async def test_morning_report_surfaces_failed_symbols() -> None:
     assert run.report.failed_symbol_names == ("BBB",)
 
 
+async def test_morning_workflow_hard_auth_failure_surfaces() -> None:
+    """A hard auth failure aborts the run and is surfaced clearly."""
+    engine = build_workflow_engine(services=_services(auth_fail=True))
+    request = WorkflowRequest(symbols=("AAA",), interval=Interval.ONE_MINUTE)
+    run = await engine.run("morning", request)
+
+    assert run.success is False
+    assert run.report is None
+    assert run.error is not None
+    assert "credential" in run.error.lower() or "auth" in run.error.lower()
+    assert run.steps[-1].ok is False
+
+
 def test_render_morning_shows_import_counts() -> None:
     """The terminal render surfaces imported/failed symbols and names."""
     from app.cli.render import render_run
@@ -246,9 +271,7 @@ def test_render_morning_shows_import_counts() -> None:
         report=report,
     )
     text = render_run(run)
-    assert "Imported Symbols:    1" in text
-    assert "Failed Symbols:      1" in text
-    assert "Failed: BBB" in text
+    assert "Import:              1 ok / 1 failed (BBB)" in text
 
 
 async def test_morning_workflow_step_failure() -> None:
@@ -335,6 +358,42 @@ def test_cli_health() -> None:
     assert result.exit_code == 0
     assert "Configuration" in result.stdout
     assert "Database" in result.stdout
+
+
+def test_health_provider_surfaces_hard_auth_failure() -> None:
+    """A hard auth failure is a critical, unhealthy provider check."""
+    from app.config.broker import GrowwSettings
+    from app.config.settings import Settings
+    from app.providers.exceptions import AuthenticationError
+    from app.workflow.diagnostics import run_health_checks
+
+    async def _fail_probe(_groww: GrowwSettings) -> None:
+        raise AuthenticationError("Groww rejected credentials.")
+
+    settings = Settings(groww=GrowwSettings(api_key="k", totp_seed="AAAA"))
+    checks = run_health_checks(settings, auth_probe=_fail_probe)
+    provider = next(check for check in checks if check.name == "Provider")
+
+    assert provider.healthy is False
+    assert provider.critical is True
+    assert "auth" in provider.detail.lower()
+
+
+def test_health_provider_reports_authenticated() -> None:
+    """A successful auth probe yields a healthy provider check."""
+    from app.config.broker import GrowwSettings
+    from app.config.settings import Settings
+    from app.workflow.diagnostics import run_health_checks
+
+    async def _ok_probe(_groww: GrowwSettings) -> None:
+        return None
+
+    settings = Settings(groww=GrowwSettings(api_key="k", totp_seed="AAAA"))
+    checks = run_health_checks(settings, auth_probe=_ok_probe)
+    provider = next(check for check in checks if check.name == "Provider")
+
+    assert provider.healthy is True
+    assert "authenticated" in provider.detail.lower()
 
 
 def test_cli_morning(monkeypatch: pytest.MonkeyPatch) -> None:

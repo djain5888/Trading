@@ -90,12 +90,9 @@ def _render_morning(report: MorningReport) -> list[str]:
         f"Market Status:       {'OPEN' if report.market_open else 'CLOSED'}",
         f"Market State:        {report.market_state}",
         f"Stocks Scanned:      {report.stocks_scanned}",
-        f"Imported Symbols:    {report.imported_symbols}",
-        f"Failed Symbols:      {report.failed_symbols}",
+        f"Import:              {_format_import(report)}",
+        f"Indicators Refreshed:{report.indicators_refreshed}",
     ]
-    if report.failed_symbol_names:
-        lines.append(f"  Failed: {', '.join(report.failed_symbol_names)}")
-    lines.append(f"Indicators Refreshed:{report.indicators_refreshed}")
     if report.scanner_summary:
         lines.append("Scanner Results:")
         for name, count in sorted(report.scanner_summary.items()):
@@ -104,6 +101,14 @@ def _render_morning(report: MorningReport) -> list[str]:
     lines.extend(_render_results(report.top_results))
     lines.append(f"Generated At:        {report.generated_at.isoformat()}")
     return lines
+
+
+def _format_import(report: MorningReport) -> str:
+    """Format import counts, e.g. ``24 ok / 3 failed (XYZ, ABC, PQR)``."""
+    line = f"{report.imported_symbols} ok / {report.failed_symbols} failed"
+    if report.failed_symbol_names:
+        line += f" ({', '.join(report.failed_symbol_names)})"
+    return line
 
 
 def _render_results(results: tuple[ScannerResult, ...]) -> list[str]:

@@ -70,11 +70,21 @@ class GrowwSessionManager:
                 return self._token
             return await self._refresh()
 
-    def invalidate(self) -> None:
+    def invalidate(self, stale_token: str | None = None) -> None:
         """Drop the cached token so the next call re-authenticates.
 
-        Used to recover from a mid-run 401 by forcing a single re-auth.
+        Used to recover from a mid-run 401 by forcing a single re-auth. When
+        ``stale_token`` is given, the cache is cleared only if it still holds
+        that exact token: a concurrent caller may already have refreshed it, in
+        which case dropping the fresh token would trigger a redundant refresh.
+        This compare-and-swap keeps re-auth single-flight under concurrency.
+
+        Args:
+            stale_token: The token that just failed; when set, invalidation is
+                a no-op unless it is still the cached token.
         """
+        if stale_token is not None and self._token != stale_token:
+            return
         self._token = None
         self._expires_at = None
 

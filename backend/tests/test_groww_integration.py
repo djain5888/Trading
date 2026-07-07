@@ -240,6 +240,42 @@ async def test_reauth_on_401_then_succeeds() -> None:
     assert data_calls == 2  # 401 then success
 
 
+async def test_session_invalidate_is_single_flight() -> None:
+    """Invalidate drops only the failing token, so re-auth never double-refreshes."""
+    from app.providers.groww.session import GrowwSessionManager
+
+    refreshes = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal refreshes
+        refreshes += 1
+        return httpx.Response(
+            200, json={"access_token": f"tok-{refreshes}", "expires_in": 3600}
+        )
+
+    settings = _settings(totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+    client = httpx.AsyncClient(
+        base_url=settings.base_url, transport=httpx.MockTransport(handler)
+    )
+    http = GrowwHTTPClient(settings, client=client, sleeper=RecordingSleeper())
+    session = GrowwSessionManager(settings, http, clock=FakeClock(_END))
+
+    first = await session.get_access_token()
+    assert first == "tok-1"
+    assert await session.get_access_token() == "tok-1"  # cached, no refresh
+    assert refreshes == 1
+
+    # A stale token that is no longer current must not force a refresh.
+    session.invalidate("tok-0")
+    assert await session.get_access_token() == "tok-1"
+    assert refreshes == 1
+
+    # Invalidating the live token forces exactly one refresh.
+    session.invalidate("tok-1")
+    assert await session.get_access_token() == "tok-2"
+    assert refreshes == 2
+
+
 async def test_second_401_is_hard_auth_failure() -> None:
     """A persistent 401 (even after re-auth) surfaces as AuthenticationError."""
     auth_calls = 0
