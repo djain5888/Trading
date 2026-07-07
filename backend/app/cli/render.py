@@ -7,6 +7,7 @@ separate from the Typer commands so they are unit-testable.
 from __future__ import annotations
 
 from app.market.regime.models import RegimeReport
+from app.market.sector.models import SectorReport
 from app.scanner.models import ScannerResult
 from app.workflow.diagnostics import HealthCheck, VersionInfo
 from app.workflow.models import (
@@ -16,6 +17,7 @@ from app.workflow.models import (
     MorningReport,
     RegimeWorkflowReport,
     ScanReport,
+    SectorWorkflowReport,
     WorkflowRun,
 )
 
@@ -74,6 +76,8 @@ def _render_report(report: object) -> list[str]:
         ]
     if isinstance(report, RegimeWorkflowReport):
         return _render_regime(report.regime)
+    if isinstance(report, SectorWorkflowReport):
+        return _render_sectors(report.sectors)
     if isinstance(report, IndicatorsReport):
         return ["", f"Computed: {report.computed}  Skipped: {report.skipped}"]
     if isinstance(report, CollectReport):
@@ -97,6 +101,7 @@ def _render_morning(report: MorningReport) -> list[str]:
         f"Import:              {_format_import(report)}",
         f"Indicators Refreshed:{report.indicators_refreshed}",
         f"Market Regime:       {_regime_summary(report.regime)}",
+        f"Sector Strength:     {_sector_summary(report.sectors)}",
     ]
     if report.scanner_summary:
         lines.append("Scanner Results:")
@@ -139,6 +144,42 @@ def _render_regime(report: RegimeReport) -> list[str]:
                 f"Breadth:    {report.breadth:.0f}% of watchlist above 50 EMA",
             ]
         )
+    lines.append(f"Generated:  {report.generated_at.isoformat()}")
+    return lines
+
+
+def _sector_summary(report: SectorReport | None) -> str:
+    """Format a one-line sector summary for the morning report."""
+    if report is None or not report.available:
+        return "unavailable"
+    if not report.ranked:
+        return "no sector had enough valid members"
+    strongest = report.strongest[0]
+    weakest = report.weakest[0]
+    return (
+        f"strongest {strongest.sector} ({strongest.score:.0f}, "
+        f"{strongest.trend.value}), weakest {weakest.sector} "
+        f"({weakest.score:.0f}, {weakest.trend.value})"
+    )
+
+
+def _render_sectors(report: SectorReport) -> list[str]:
+    """Render a standalone sector-strength report."""
+    lines = ["", "===== Titan Sector Strength ====="]
+    if not report.available:
+        lines.append("Sectors:    unavailable")
+        lines.append(f"Detail:     {report.detail}")
+    elif not report.ranked:
+        lines.append("Sectors:    no sector had enough valid members")
+    else:
+        for index, sector in enumerate(report.ranked, start=1):
+            lines.append(
+                f"  {index:>2}. {sector.sector:<14} "
+                f"score={sector.score:5.1f} "
+                f"trend={sector.trend.value:<4} "
+                f"above={sector.above_pct:.0f}% "
+                f"({sector.members} members)"
+            )
     lines.append(f"Generated:  {report.generated_at.isoformat()}")
     return lines
 

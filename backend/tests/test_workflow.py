@@ -32,6 +32,7 @@ from app.market.models import (
     SymbolSearchResponse,
 )
 from app.market.regime.engine import MarketRegimeEngine
+from app.market.sector.engine import SectorStrengthEngine
 from app.providers.base import MarketDataProvider
 from app.scanner.dependencies import get_scanner_registry
 from app.scanner.engine import ScannerEngine
@@ -168,6 +169,7 @@ def _services(
         data_engine, indicator_engine, calendar, clock, get_scanner_registry()
     )
     regime_engine = MarketRegimeEngine(data_engine, indicator_engine, clock)
+    sector_engine = SectorStrengthEngine(data_engine, indicator_engine, clock)
 
     def _collector_factory(config: CollectorConfig) -> LiveMarketCollector:
         return LiveMarketCollector(
@@ -194,6 +196,7 @@ def _services(
         indicator_engine=indicator_engine,
         scanner_engine=scanner_engine,
         regime_engine=regime_engine,
+        sector_engine=sector_engine,
         provider=_StubProvider(),
         collector_factory=_collector_factory,
     )
@@ -212,7 +215,7 @@ async def test_morning_workflow_success() -> None:
 
     assert run.success
     assert run.error is None
-    assert len(run.steps) == 7
+    assert len(run.steps) == 8
     assert all(step.ok for step in run.steps)
     assert isinstance(run.report, MorningReport)
     assert run.report.stocks_scanned == 2
@@ -326,6 +329,7 @@ def test_registry_lists_workflows() -> None:
         "indicators",
         "scan",
         "regime",
+        "sectors",
         "collect",
     }
 

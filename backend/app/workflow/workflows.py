@@ -13,6 +13,7 @@ from typing import ClassVar
 from app.market.historical.models import SeriesKey
 from app.market.live.models import CollectorConfig
 from app.market.regime.models import RegimeReport
+from app.market.sector.models import SectorReport
 from app.scanner.engine import ScannerEngine
 from app.scanner.models import ScannerResult
 from app.workflow.base import Workflow
@@ -24,6 +25,7 @@ from app.workflow.models import (
     MorningReport,
     RegimeWorkflowReport,
     ScanReport,
+    SectorWorkflowReport,
 )
 from app.workflow.services import WorkflowServices
 
@@ -71,6 +73,9 @@ class MorningWorkflow(Workflow):
         regime = await context.run_step(
             "Assess market regime", self._regime(context, end)
         )
+        sectors = await context.run_step(
+            "Rank sector strength", self._sectors(context, end)
+        )
         raw = await context.run_step(
             "Run scanners", self._scan(context, keys, start, end)
         )
@@ -78,7 +83,15 @@ class MorningWorkflow(Workflow):
         return await context.run_step(
             "Generate report",
             self._report(
-                context, state, len(keys), imported, refreshed, regime, raw, ranked
+                context,
+                state,
+                len(keys),
+                imported,
+                refreshed,
+                regime,
+                sectors,
+                raw,
+                ranked,
             ),
         )
 
@@ -90,6 +103,7 @@ class MorningWorkflow(Workflow):
         imported: tuple[list[str], list[str]],
         refreshed: int,
         regime: RegimeReport,
+        sectors: SectorReport,
         raw: list[ScannerResult],
         ranked: list[ScannerResult],
     ) -> MorningReport:
@@ -106,6 +120,7 @@ class MorningWorkflow(Workflow):
             failed_symbol_names=tuple(failed_symbols),
             indicators_refreshed=refreshed,
             regime=regime,
+            sectors=sectors,
             scanner_summary=summary,
             top_results=tuple(ranked),
             generated_at=context.services.clock.now(),
@@ -115,6 +130,16 @@ class MorningWorkflow(Workflow):
         """Classify the market regime; degrades gracefully if data is missing."""
         request = context.request
         return await context.services.regime_engine.analyze(
+            request.symbols,
+            exchange=request.exchange,
+            interval=request.interval,
+            end=end,
+        )
+
+    async def _sectors(self, context: WorkflowContext, end: datetime) -> SectorReport:
+        """Rank sector strength; degrades gracefully without metadata."""
+        request = context.request
+        return await context.services.sector_engine.analyze(
             request.symbols,
             exchange=request.exchange,
             interval=request.interval,
@@ -315,6 +340,30 @@ class RegimeWorkflow(Workflow):
             ),
         )
         return RegimeWorkflowReport(regime=report)
+
+
+class SectorWorkflow(Workflow):
+    """Ranks sector strength across the watchlist."""
+
+    name: ClassVar[str] = "sectors"
+
+    async def run(self, context: WorkflowContext) -> SectorWorkflowReport:
+        """Rank sector strength and wrap it in a workflow report."""
+        services = context.services
+        request = context.request
+        _, end = _resolve_range(
+            services, request.start, request.end, request.history_days
+        )
+        report = await context.run_step(
+            "Rank sector strength",
+            services.sector_engine.analyze(
+                request.symbols,
+                exchange=request.exchange,
+                interval=request.interval,
+                end=end,
+            ),
+        )
+        return SectorWorkflowReport(sectors=report)
 
 
 class CollectWorkflow(Workflow):

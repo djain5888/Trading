@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.market.enums import Exchange, Interval
 from app.market.historical.importer.models import ImportMode
 from app.market.regime.models import RegimeReport
+from app.market.sector.models import SectorReport
 from app.scanner.models import ScannerResult
 
 #: Default indicators refreshed by the morning workflow.
@@ -94,6 +95,9 @@ class MorningReport(WorkflowReport):
     regime: RegimeReport | None = Field(
         default=None, description="Market-regime classification, if produced."
     )
+    sectors: SectorReport | None = Field(
+        default=None, description="Sector-strength ranking, if produced."
+    )
     scanner_summary: dict[str, int] = Field(
         default_factory=dict, description="Candidate count per scanner."
     )
@@ -114,6 +118,12 @@ class RegimeWorkflowReport(WorkflowReport):
     """Standalone market-regime report for the ``regime`` workflow."""
 
     regime: RegimeReport = Field(description="The market-regime classification.")
+
+
+class SectorWorkflowReport(WorkflowReport):
+    """Standalone sector-strength report for the ``sectors`` workflow."""
+
+    sectors: SectorReport = Field(description="The sector-strength ranking.")
 
 
 class ImportReport(WorkflowReport):
