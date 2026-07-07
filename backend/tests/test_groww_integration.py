@@ -112,6 +112,41 @@ async def test_auth_includes_totp() -> None:
     assert captured["key"] == "test-key"
 
 
+async def test_auth_secret_only_omits_totp() -> None:
+    """With a secret but no TOTP seed, auth sends the secret and no TOTP."""
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/auth/token"):
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        assert request.headers["Authorization"] == "Bearer tok"
+        return httpx.Response(
+            200,
+            json={"symbol": "R", "last_price": "1", "timestamp": _END.isoformat()},
+        )
+
+    settings = _settings(api_secret="sekret")  # no totp_seed configured
+    provider = _provider(handler, settings)
+
+    quote = await provider.get_quote("R")
+
+    assert quote.symbol == "R"
+    assert captured["secret"] == "sekret"
+    assert "totp" not in captured
+
+
+def test_blank_totp_seed_normalises_to_none() -> None:
+    """Blank optional secrets are treated as unset (no forced TOTP auth)."""
+    assert _settings(api_secret="s", totp_seed="").totp_seed is None
+    assert _settings(api_secret="s", totp_seed="   ").totp_seed is None
+    assert _settings(api_secret="  ").api_secret is None
+
+    secret_only = _settings(api_secret="s", totp_seed="")
+    assert secret_only.uses_token_exchange is True  # secret still needs exchange
+    assert secret_only.totp_seed is None  # but TOTP is not required
+
+
 # -- Throttle --------------------------------------------------------------
 
 

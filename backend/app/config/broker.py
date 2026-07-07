@@ -6,7 +6,7 @@ Groww is the initial broker integration for the Indian market.
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from app.config.base import BaseConfig, build_config
 
@@ -25,6 +25,20 @@ class GrowwSettings(BaseConfig):
         default=None,
         description="Base32 TOTP seed for API-key + TOTP auth. Never hardcode.",
     )
+
+    @field_validator("api_secret", "totp_seed", mode="before")
+    @classmethod
+    def _blank_to_none(cls, value: str | None) -> str | None:
+        """Treat a blank optional secret as unset.
+
+        Environment variables set to an empty or whitespace string (e.g. an
+        unfilled ``GROWW_TOTP_SEED=`` line) would otherwise parse as ``""`` and
+        wrongly enable that auth mode — forcing TOTP when only a secret is set.
+        """
+        if value is None:
+            return None
+        text = str(value).strip()
+        return text or None
 
     # Endpoint configuration. Kept here (not in code) so no URL is hardcoded in
     # the provider and every deployment can point at its own gateway/mock.
