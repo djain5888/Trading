@@ -24,7 +24,7 @@ from app.config.environment import Environment
 __all__ = ["Environment", "Settings", "get_settings"]
 
 #: Selectable market-data provider backends.
-MarketDataBackend = Literal["groww", "fake"]
+MarketDataBackend = Literal["groww", "groww_sdk", "fake"]
 
 
 class Settings(BaseSettings):
@@ -61,7 +61,10 @@ class Settings(BaseSettings):
     # --- Providers ---
     market_data_provider: MarketDataBackend = Field(
         default="groww",
-        description="Market-data backend: 'groww' (real) or 'fake' (skeleton).",
+        description=(
+            "Market-data backend: 'groww' (real httpx), 'groww_sdk' (growwapi "
+            "SDK) or 'fake' (offline skeleton)."
+        ),
     )
 
     # --- Infrastructure groups ---
