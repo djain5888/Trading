@@ -157,7 +157,9 @@ class GrowwHTTPClient:
         detail = response.text[:512]
         if status in (_UNAUTHORIZED, _FORBIDDEN):
             return (
-                AuthenticationError("Groww rejected credentials.", details=detail),
+                AuthenticationError(
+                    f"Groww rejected credentials (HTTP {status}).", details=detail
+                ),
                 False,
                 None,
             )

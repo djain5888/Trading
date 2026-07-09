@@ -142,11 +142,20 @@ def _check_provider(
         asyncio.run(probe(groww))
     except AuthenticationError as exc:
         return HealthCheck(
-            "Provider", False, True, f"Groww authentication failed: {exc}"
+            "Provider", False, True, f"Groww authentication failed: {_describe(exc)}"
         )
     except ProviderError as exc:
-        return HealthCheck("Provider", False, False, f"Groww auth unavailable: {exc}")
-    return HealthCheck("Provider", True, False, "Groww authenticated")
+        return HealthCheck(
+            "Provider", False, False, f"Groww auth unavailable: {_describe(exc)}"
+        )
+    return HealthCheck(
+        "Provider", True, False, f"Groww authenticated ({groww.auth_mode})"
+    )
+
+
+def _describe(exc: ProviderError) -> str:
+    """Return the provider error's message plus any upstream detail (code+body)."""
+    return f"{exc.message} — {exc.details}" if exc.details else exc.message
 
 
 async def _live_auth_probe(groww: GrowwSettings) -> None:

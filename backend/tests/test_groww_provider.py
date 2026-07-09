@@ -78,7 +78,7 @@ async def test_authentication_exchanges_and_caches_token() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         calls.append(request.url.path)
-        if request.url.path.endswith("/auth/token"):
+        if request.url.path.endswith("/token/api/access"):
             return _json({"access_token": "tok-123", "expires_in": 3600})
         assert request.headers["Authorization"] == "Bearer tok-123"
         return _json(
@@ -89,12 +89,14 @@ async def test_authentication_exchanges_and_caches_token() -> None:
             }
         )
 
-    provider = _provider(handler, settings=_settings(api_secret="shh"))
+    provider = _provider(
+        handler, settings=_settings(auth_mode="key_secret", api_secret="shh")
+    )
 
     await provider.get_quote("RELIANCE")
     await provider.get_quote("RELIANCE")
 
-    assert calls.count("/v1/auth/token") == 1  # token cached across calls
+    assert calls.count("/v1/token/api/access") == 1  # token cached across calls
 
 
 async def test_direct_key_auth_without_secret() -> None:
@@ -122,12 +124,14 @@ async def test_token_refresh_after_expiry() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal auth_calls
-        if request.url.path.endswith("/auth/token"):
+        if request.url.path.endswith("/token/api/access"):
             auth_calls += 1
             return _json({"access_token": f"tok-{auth_calls}", "expires_in": 100})
         return _json({"symbol": "R", "last_price": "1", "timestamp": _NOW.isoformat()})
 
-    settings = _settings(api_secret="shh", token_refresh_skew_seconds=0)
+    settings = _settings(
+        auth_mode="key_secret", api_secret="shh", token_refresh_skew_seconds=0
+    )
     client = httpx.AsyncClient(
         base_url=settings.base_url, transport=httpx.MockTransport(handler)
     )

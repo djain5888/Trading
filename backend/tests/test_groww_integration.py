@@ -28,6 +28,7 @@ from app.providers.groww.http_client import GrowwHTTPClient
 from app.providers.groww.market_data_provider import GrowwMarketDataProvider
 from app.providers.groww.provider import GrowwProvider
 from app.providers.groww.totp import generate_totp
+from pydantic import ValidationError
 
 Handler = Callable[[httpx.Request], httpx.Response]
 _END = datetime(2025, 1, 6, 15, 30, tzinfo=INDIA_TZ)  # Monday close
@@ -94,7 +95,7 @@ async def test_auth_includes_totp() -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/auth/token"):
+        if request.url.path.endswith("/token/api/access"):
             captured.update(json.loads(request.content))
             return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
         assert request.headers["Authorization"] == "Bearer tok"
@@ -103,7 +104,7 @@ async def test_auth_includes_totp() -> None:
             json={"symbol": "R", "last_price": "1", "timestamp": _END.isoformat()},
         )
 
-    settings = _settings(totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+    settings = _settings(auth_mode="totp", totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
     provider = _provider(handler, settings)
 
     await provider.get_quote("R")
@@ -117,7 +118,7 @@ async def test_auth_secret_only_omits_totp() -> None:
     captured: dict[str, object] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/auth/token"):
+        if request.url.path.endswith("/token/api/access"):
             captured.update(json.loads(request.content))
             return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
         assert request.headers["Authorization"] == "Bearer tok"
@@ -126,7 +127,7 @@ async def test_auth_secret_only_omits_totp() -> None:
             json={"symbol": "R", "last_price": "1", "timestamp": _END.isoformat()},
         )
 
-    settings = _settings(api_secret="sekret")  # no totp_seed configured
+    settings = _settings(auth_mode="key_secret", api_secret="sekret")
     provider = _provider(handler, settings)
 
     quote = await provider.get_quote("R")
@@ -142,9 +143,11 @@ def test_blank_totp_seed_normalises_to_none() -> None:
     assert _settings(api_secret="s", totp_seed="   ").totp_seed is None
     assert _settings(api_secret="  ").api_secret is None
 
-    secret_only = _settings(api_secret="s", totp_seed="")
-    assert secret_only.uses_token_exchange is True  # secret still needs exchange
-    assert secret_only.totp_seed is None  # but TOTP is not required
+    # key_secret mode ignores a blank seed entirely — it never forces TOTP.
+    secret_only = _settings(auth_mode="key_secret", api_secret="s", totp_seed="")
+    assert secret_only.uses_token_exchange is True
+    assert secret_only.uses_totp is False
+    assert secret_only.totp_seed is None
 
 
 # -- Throttle --------------------------------------------------------------
@@ -252,7 +255,7 @@ async def test_reauth_on_401_then_succeeds() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal auth_calls, data_calls
-        if request.url.path.endswith("/auth/token"):
+        if request.url.path.endswith("/token/api/access"):
             auth_calls += 1
             return httpx.Response(
                 200, json={"access_token": f"tok-{auth_calls}", "expires_in": 3600}
@@ -265,7 +268,7 @@ async def test_reauth_on_401_then_succeeds() -> None:
             200, json={"symbol": "R", "last_price": "1", "timestamp": _END.isoformat()}
         )
 
-    settings = _settings(totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+    settings = _settings(auth_mode="totp", totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
     provider = _provider(handler, settings)
 
     quote = await provider.get_quote("R")
@@ -288,7 +291,7 @@ async def test_session_invalidate_is_single_flight() -> None:
             200, json={"access_token": f"tok-{refreshes}", "expires_in": 3600}
         )
 
-    settings = _settings(totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+    settings = _settings(auth_mode="totp", totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
     client = httpx.AsyncClient(
         base_url=settings.base_url, transport=httpx.MockTransport(handler)
     )
@@ -318,7 +321,7 @@ async def test_second_401_is_hard_auth_failure() -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal auth_calls, data_calls
-        if request.url.path.endswith("/auth/token"):
+        if request.url.path.endswith("/token/api/access"):
             auth_calls += 1
             return httpx.Response(
                 200, json={"access_token": f"tok-{auth_calls}", "expires_in": 3600}
@@ -326,7 +329,7 @@ async def test_second_401_is_hard_auth_failure() -> None:
         data_calls += 1
         return httpx.Response(401, json={"error": "unauthorized"})
 
-    settings = _settings(totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
+    settings = _settings(auth_mode="totp", totp_seed="GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ")
     provider = _provider(handler, settings)
 
     from app.providers.exceptions import AuthenticationError
@@ -352,8 +355,72 @@ def test_di_fake_backend_uses_skeleton() -> None:
     assert isinstance(provider, GrowwProvider)
 
 
-def test_uses_token_exchange_flag() -> None:
-    """Token exchange is required only when a secret or TOTP seed is set."""
-    assert _settings().uses_token_exchange is False
-    assert _settings(totp_seed="AAAA").uses_token_exchange is True
-    assert _settings(api_secret="s").uses_token_exchange is True
+def test_auth_mode_drives_token_exchange() -> None:
+    """The explicit auth mode alone decides whether a token exchange runs."""
+    assert _settings(auth_mode="token").uses_token_exchange is False
+    assert _settings(auth_mode="key_secret", api_secret="s").uses_token_exchange is True
+    assert _settings(auth_mode="totp", totp_seed="AAAA").uses_token_exchange is True
+    # A present seed does NOT flip a key_secret/token mode into TOTP.
+    assert _settings(auth_mode="token", totp_seed="AAAA").uses_totp is False
+    assert (
+        _settings(auth_mode="key_secret", api_secret="s", totp_seed="AAAA").uses_totp
+        is False
+    )
+
+
+def test_auth_mode_validation_errors() -> None:
+    """Each mode requires its credential; a clear error is raised if missing."""
+    with pytest.raises(ValidationError):
+        _settings(auth_mode="key_secret")  # no api_secret
+    with pytest.raises(ValidationError):
+        _settings(auth_mode="totp")  # no totp_seed
+    # token needs only the api_key (already present) and validates cleanly.
+    assert _settings(auth_mode="token").auth_mode == "token"
+
+
+async def test_auth_key_secret_sends_secret_not_totp() -> None:
+    """key_secret mode hits the access endpoint with the secret and no TOTP."""
+    captured: dict[str, object] = {}
+    path_seen = ""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal path_seen
+        if request.url.path.endswith("/token/api/access"):
+            path_seen = request.url.path
+            captured.update(json.loads(request.content))
+            return httpx.Response(200, json={"access_token": "tok", "expires_in": 3600})
+        assert request.headers["Authorization"] == "Bearer tok"
+        return httpx.Response(
+            200, json={"symbol": "R", "last_price": "1", "timestamp": _END.isoformat()}
+        )
+
+    settings = _settings(auth_mode="key_secret", api_secret="sekret")
+    provider = _provider(handler, settings)
+
+    await provider.get_quote("R")
+
+    assert captured == {"key": "test-key", "secret": "sekret"}
+    assert "totp" not in captured
+    assert path_seen.endswith("/token/api/access")
+
+
+async def test_auth_token_mode_uses_key_as_bearer() -> None:
+    """token mode sends the API key as the bearer with no exchange call."""
+    auth_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal auth_calls
+        if request.url.path.endswith("/token/api/access"):
+            auth_calls += 1
+            return httpx.Response(200, json={"access_token": "unused"})
+        assert request.headers["Authorization"] == "Bearer test-key"
+        return httpx.Response(
+            200, json={"symbol": "R", "last_price": "1", "timestamp": _END.isoformat()}
+        )
+
+    provider = _provider(handler, _settings(auth_mode="token"))
+
+    quote = await provider.get_quote("R")
+
+    assert quote.symbol == "R"
+    assert auth_calls == 0  # no token exchange in token mode

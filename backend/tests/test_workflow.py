@@ -382,7 +382,9 @@ def test_health_provider_surfaces_hard_auth_failure() -> None:
     async def _fail_probe(_groww: GrowwSettings) -> None:
         raise AuthenticationError("Groww rejected credentials.")
 
-    settings = Settings(groww=GrowwSettings(api_key="k", totp_seed="AAAA"))
+    settings = Settings(
+        groww=GrowwSettings(api_key="k", auth_mode="totp", totp_seed="AAAA")
+    )
     checks = run_health_checks(settings, auth_probe=_fail_probe)
     provider = next(check for check in checks if check.name == "Provider")
 
@@ -400,12 +402,38 @@ def test_health_provider_reports_authenticated() -> None:
     async def _ok_probe(_groww: GrowwSettings) -> None:
         return None
 
-    settings = Settings(groww=GrowwSettings(api_key="k", totp_seed="AAAA"))
+    settings = Settings(
+        groww=GrowwSettings(api_key="k", auth_mode="totp", totp_seed="AAAA")
+    )
     checks = run_health_checks(settings, auth_probe=_ok_probe)
     provider = next(check for check in checks if check.name == "Provider")
 
     assert provider.healthy is True
     assert "authenticated" in provider.detail.lower()
+
+
+def test_health_surfaces_real_groww_http_error() -> None:
+    """The provider check surfaces the upstream HTTP code and message."""
+    from app.config.broker import GrowwSettings
+    from app.config.settings import Settings
+    from app.providers.exceptions import AuthenticationError
+    from app.workflow.diagnostics import run_health_checks
+
+    async def _http_fail(_groww: GrowwSettings) -> None:
+        raise AuthenticationError(
+            "Groww rejected credentials (HTTP 401).",
+            details='{"error":"invalid api key"}',
+        )
+
+    settings = Settings(
+        groww=GrowwSettings(api_key="k", auth_mode="key_secret", api_secret="s")
+    )
+    checks = run_health_checks(settings, auth_probe=_http_fail)
+    provider = next(check for check in checks if check.name == "Provider")
+
+    assert provider.healthy is False
+    assert "HTTP 401" in provider.detail
+    assert "invalid api key" in provider.detail  # upstream body surfaced
 
 
 def test_cli_morning(monkeypatch: pytest.MonkeyPatch) -> None:

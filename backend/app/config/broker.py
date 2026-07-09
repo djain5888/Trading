@@ -6,9 +6,14 @@ Groww is the initial broker integration for the Indian market.
 
 from __future__ import annotations
 
-from pydantic import Field, field_validator
+from typing import Literal
+
+from pydantic import Field, field_validator, model_validator
 
 from app.config.base import BaseConfig, build_config
+
+#: Explicit Groww authentication modes (``GROWW_AUTH_MODE``).
+GrowwAuthMode = Literal["key_secret", "totp", "token"]
 
 
 class GrowwSettings(BaseConfig):
@@ -19,11 +24,19 @@ class GrowwSettings(BaseConfig):
     api_key: str = Field(default="", description="Groww API key.")
     api_secret: str | None = Field(
         default=None,
-        description="Groww API secret. Optional until secret-based auth is used.",
+        description="Groww API secret. Required when GROWW_AUTH_MODE=key_secret.",
     )
     totp_seed: str | None = Field(
         default=None,
-        description="Base32 TOTP seed for API-key + TOTP auth. Never hardcode.",
+        description="Base32 TOTP seed; required when GROWW_AUTH_MODE=totp.",
+    )
+    auth_mode: GrowwAuthMode = Field(
+        default="token",
+        description=(
+            "Explicit auth mode. 'key_secret': API key + secret checksum "
+            "exchange. 'totp': API key + TOTP seed. 'token': API key used "
+            "directly as a bearer access token (no exchange)."
+        ),
     )
 
     @field_validator("api_secret", "totp_seed", mode="before")
@@ -33,12 +46,28 @@ class GrowwSettings(BaseConfig):
 
         Environment variables set to an empty or whitespace string (e.g. an
         unfilled ``GROWW_TOTP_SEED=`` line) would otherwise parse as ``""`` and
-        wrongly enable that auth mode — forcing TOTP when only a secret is set.
+        be mistaken for a configured secret.
         """
         if value is None:
             return None
         text = str(value).strip()
         return text or None
+
+    @model_validator(mode="after")
+    def _validate_auth_mode(self) -> GrowwSettings:
+        """Require the credential each explicit auth mode needs.
+
+        The mode is honoured exactly; a blank or present seed never changes the
+        selected mode. ``token`` needs only the API key (validated at use).
+
+        Raises:
+            ValueError: If the mode's required credential is missing.
+        """
+        if self.auth_mode == "key_secret" and self.api_secret is None:
+            raise ValueError("GROWW_AUTH_MODE=key_secret requires GROWW_API_SECRET.")
+        if self.auth_mode == "totp" and self.totp_seed is None:
+            raise ValueError("GROWW_AUTH_MODE=totp requires GROWW_TOTP_SEED.")
+        return self
 
     # Endpoint configuration. Kept here (not in code) so no URL is hardcoded in
     # the provider and every deployment can point at its own gateway/mock.
@@ -98,5 +127,10 @@ class GrowwSettings(BaseConfig):
 
     @property
     def uses_token_exchange(self) -> bool:
-        """Return whether auth requires a token exchange (secret or TOTP set)."""
-        return self.api_secret is not None or self.totp_seed is not None
+        """Return whether the mode exchanges credentials for an access token."""
+        return self.auth_mode != "token"
+
+    @property
+    def uses_totp(self) -> bool:
+        """Return whether the selected mode authenticates with a TOTP."""
+        return self.auth_mode == "totp"

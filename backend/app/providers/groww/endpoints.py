@@ -47,8 +47,8 @@ def _path(api_version: str, *segments: str) -> str:
 
 
 def auth(api_version: str) -> str:
-    """Return the authentication path (used by the session manager)."""
-    return _path(api_version, "auth", "token")
+    """Return the access-token exchange path (checksum / TOTP exchange)."""
+    return _path(api_version, "token", "api", "access")
 
 
 def market_status(api_version: str, exchange: Exchange) -> RequestSpec:
