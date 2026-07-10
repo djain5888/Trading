@@ -125,19 +125,44 @@ def _check_calendar() -> HealthCheck:
 def _check_provider(
     settings: Settings, auth_probe: AuthProbe | None = None
 ) -> HealthCheck:
-    """Verify the market-data provider.
+    """Verify the configured market-data provider.
 
-    A missing key is a non-critical, expected state (offline/CI). When token
-    exchange is configured, a live auth probe runs: a hard authentication
-    failure is surfaced as a critical, unhealthy check so ``titan health``
-    exits non-zero and the operator sees the broker rejected the credentials.
+    A missing credential is a non-critical, expected state (offline/CI). When
+    credentials are present a live auth probe runs: a hard authentication
+    failure (for the SDK backend, an expired/unapproved key) is a critical,
+    unhealthy check so ``titan health`` exits non-zero.
     """
+    backend = settings.market_data_provider
     groww = settings.groww
+    if backend == "fake":
+        return HealthCheck("Provider", True, False, "Offline skeleton provider (fake)")
+    if backend == "groww_sdk":
+        if not groww.sdk_is_configured:
+            return HealthCheck(
+                "Provider",
+                False,
+                False,
+                "Groww SDK token missing (set GROWW_ACCESS_TOKEN or "
+                "GROWW_TOTP_TOKEN + GROWW_TOTP_SECRET)",
+            )
+        return _probe_provider(
+            groww, auth_probe or _sdk_auth_probe, "Groww SDK authenticated"
+        )
     if not groww.is_configured:
         return HealthCheck("Provider", False, False, "Groww API key missing")
     if not groww.uses_token_exchange:
         return HealthCheck("Provider", True, False, "Groww API key configured")
-    probe = auth_probe or _live_auth_probe
+    return _probe_provider(
+        groww,
+        auth_probe or _live_auth_probe,
+        f"Groww authenticated ({groww.auth_mode})",
+    )
+
+
+def _probe_provider(
+    groww: GrowwSettings, probe: AuthProbe, ok_detail: str
+) -> HealthCheck:
+    """Run an auth probe and map the outcome to a health check."""
     try:
         asyncio.run(probe(groww))
     except AuthenticationError as exc:
@@ -148,9 +173,7 @@ def _check_provider(
         return HealthCheck(
             "Provider", False, False, f"Groww auth unavailable: {_describe(exc)}"
         )
-    return HealthCheck(
-        "Provider", True, False, f"Groww authenticated ({groww.auth_mode})"
-    )
+    return HealthCheck("Provider", True, False, ok_detail)
 
 
 def _describe(exc: ProviderError) -> str:
@@ -159,7 +182,7 @@ def _describe(exc: ProviderError) -> str:
 
 
 async def _live_auth_probe(groww: GrowwSettings) -> None:
-    """Obtain an access token from Groww, releasing the client afterwards."""
+    """Obtain an access token from the httpx Groww provider (releases client)."""
     from app.providers.groww.http_client import GrowwHTTPClient
     from app.providers.groww.session import GrowwSessionManager
 
@@ -168,6 +191,13 @@ async def _live_auth_probe(groww: GrowwSettings) -> None:
         await GrowwSessionManager(groww, http).get_access_token()
     finally:
         await http.aclose()
+
+
+async def _sdk_auth_probe(groww: GrowwSettings) -> None:
+    """Probe the SDK provider with a lightweight LTP call (surfaces forbidden)."""
+    from app.providers.groww.sdk_provider import GrowwSDKProvider
+
+    await GrowwSDKProvider(groww).get_quote("RELIANCE")
 
 
 def _check_dependencies() -> HealthCheck:

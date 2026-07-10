@@ -1,14 +1,22 @@
-"""An alternative Groww provider backed by the official ``growwapi`` SDK.
+"""The Groww provider backed by the official ``growwapi`` SDK.
 
-This is a second implementation of :class:`MarketDataProvider`, selectable with
-``MARKET_DATA_PROVIDER=groww_sdk``. It authenticates with ``GrowwAPI(access_token=...)``
-using the configured API key and implements the two operations the SDK path
-needs: historical daily candles and the latest traded price for a watchlist.
+The default :class:`MarketDataProvider` (``MARKET_DATA_PROVIDER=groww_sdk``).
+It builds ``GrowwAPI(access_token=...)`` and implements the two operations the
+platform needs: historical daily candles and the latest traded price for a
+watchlist.
 
-The SDK is synchronous, so calls run in a worker thread to avoid blocking the
-event loop. The SDK client is a small :class:`GrowwSDKClient` protocol so it can
-be injected (and mocked) — the real ``growwapi`` package is imported lazily and
-only when no client is supplied, keeping it an optional dependency.
+Auth resolves an access token in one of two ways (TOTP preferred, since Groww
+keys reset daily at 6 AM):
+
+* TOTP: when ``GROWW_TOTP_TOKEN`` and ``GROWW_TOTP_SECRET`` are set, a fresh
+  token is minted per run via ``pyotp`` + ``GrowwAPI.get_access_token``.
+* Direct: otherwise ``GROWW_ACCESS_TOKEN`` is used as-is.
+
+The SDK is synchronous, so calls (and the lazy client build) run in a worker
+thread. ``growwapi``/``pyotp`` are imported lazily so they stay optional, and
+the client is a :class:`GrowwSDKClient` protocol so tests inject a fake. An
+"Access forbidden" error maps to :class:`AuthenticationError` so ``titan health``
+flags an expired or unapproved key.
 """
 
 from __future__ import annotations
@@ -33,14 +41,11 @@ from app.market.models import (
     SymbolSearchResponse,
 )
 from app.providers.base import MarketDataProvider
-from app.providers.exceptions import ProviderError
+from app.providers.exceptions import AuthenticationError, ProviderError
 
 logger = get_logger(__name__)
 
 _T = TypeVar("_T")
-
-#: Equity cash segment token used by the Groww SDK.
-_SEGMENT_CASH = "CASH"
 
 #: Titan interval -> Groww ``interval_in_minutes``. Daily is the primary path.
 _INTERVAL_MINUTES: dict[Interval, int] = {
@@ -57,6 +62,10 @@ _INTERVAL_MINUTES: dict[Interval, int] = {
 class GrowwSDKClient(Protocol):
     """The subset of the ``growwapi.GrowwAPI`` surface this provider uses."""
 
+    SEGMENT_CASH: str
+    EXCHANGE_NSE: str
+    EXCHANGE_BSE: str
+
     def get_historical_candle_data(
         self,
         *,
@@ -71,9 +80,9 @@ class GrowwSDKClient(Protocol):
         ...
 
     def get_ltp(
-        self, *, segment: str, exchange_trading_symbols: tuple[str, ...]
+        self, *, segment: str, exchange_trading_symbols: str
     ) -> Mapping[str, Any]:
-        """Return the last traded price for one or more instruments."""
+        """Return ``{"<EXCH>_<SYM>": price}`` for one instrument."""
         ...
 
 
@@ -106,12 +115,23 @@ class GrowwSDKProvider(MarketDataProvider):
         return self._client
 
     async def _call(self, func: Callable[[], _T], *, what: str) -> _T:
-        """Run a synchronous SDK call off the event loop, mapping failures."""
+        """Run a synchronous SDK call off the event loop, mapping failures.
+
+        Raises:
+            AuthenticationError: If Groww reports the key is forbidden.
+            ProviderError: For any other SDK failure.
+        """
         try:
             return await asyncio.to_thread(func)
         except ProviderError:
             raise
         except Exception as exc:  # noqa: BLE001 - isolate any SDK failure
+            if _is_forbidden(exc):
+                raise AuthenticationError(
+                    "Groww access forbidden — API key expired or not approved "
+                    "(Groww keys reset daily at 6 AM).",
+                    details=str(exc),
+                ) from exc
             raise ProviderError(f"Groww SDK {what} failed.", details=str(exc)) from exc
 
     async def get_historical_data(
@@ -129,17 +149,19 @@ class GrowwSDKProvider(MarketDataProvider):
             raise ProviderError(
                 f"Groww SDK provider does not support interval '{interval.value}'."
             )
-        payload = await self._call(
-            lambda: self._sdk().get_historical_candle_data(
+
+        def _run() -> Mapping[str, Any]:
+            client = self._sdk()
+            return client.get_historical_candle_data(
                 trading_symbol=trading_symbol,
-                exchange=exchange.value,
-                segment=_SEGMENT_CASH,
+                exchange=_exchange_token(client, exchange),
+                segment=client.SEGMENT_CASH,
                 start_time=_format_time(start_date),
                 end_time=_format_time(end_date),
                 interval_in_minutes=minutes,
-            ),
-            what="historical candles",
-        )
+            )
+
+        payload = await self._call(_run, what="historical candles")
         return HistoricalData(
             symbol=trading_symbol,
             exchange=exchange,
@@ -148,15 +170,17 @@ class GrowwSDKProvider(MarketDataProvider):
         )
 
     async def get_quote(self, symbol: str, exchange: Exchange = Exchange.NSE) -> Quote:
-        """Return a quote carrying the latest traded price via the SDK."""
+        """Return a quote carrying the latest traded price (LTP) via the SDK."""
         trading_symbol = symbol.strip().upper()
         key = f"{exchange.value}_{trading_symbol}"
-        payload = await self._call(
-            lambda: self._sdk().get_ltp(
-                segment=_SEGMENT_CASH, exchange_trading_symbols=(key,)
-            ),
-            what="LTP",
-        )
+
+        def _run() -> Mapping[str, Any]:
+            client = self._sdk()
+            return client.get_ltp(
+                segment=client.SEGMENT_CASH, exchange_trading_symbols=key
+            )
+
+        payload = await self._call(_run, what="LTP")
         return Quote(
             symbol=trading_symbol,
             exchange=exchange,
@@ -195,7 +219,26 @@ class GrowwSDKProvider(MarketDataProvider):
         raise ProviderError("Market depth is not supported by the Groww SDK provider.")
 
 
-# -- Response mapping ------------------------------------------------------
+# -- Error classification --------------------------------------------------
+
+
+def _is_forbidden(exc: Exception) -> bool:
+    """Return whether an SDK exception signals a forbidden (expired) key."""
+    return "forbidden" in str(exc).lower()
+
+
+# -- Exchange / response mapping -------------------------------------------
+
+
+def _exchange_token(client: GrowwSDKClient, exchange: Exchange) -> str:
+    """Map a Titan exchange to the SDK's exchange constant."""
+    if exchange is Exchange.NSE:
+        return client.EXCHANGE_NSE
+    if exchange is Exchange.BSE:
+        return client.EXCHANGE_BSE
+    raise ProviderError(
+        f"Groww SDK provider does not support exchange '{exchange.value}'."
+    )
 
 
 def _parse_candles(payload: Mapping[str, Any]) -> tuple[Candle, ...]:
@@ -212,7 +255,7 @@ def _parse_candles(payload: Mapping[str, Any]) -> tuple[Candle, ...]:
 
 
 def _candle(row: Any) -> Candle:
-    """Map one SDK candle row (``[epoch, o, h, l, c, v]`` or a mapping)."""
+    """Map one SDK candle row ``[epoch, o, h, l, c, v]`` (or a mapping)."""
     if isinstance(row, Mapping):
         timestamp = row.get("timestamp", row.get("time"))
         values = (row["open"], row["high"], row["low"], row["close"], row["volume"])
@@ -241,7 +284,7 @@ def _ltp_value(payload: Mapping[str, Any], key: str) -> Decimal:
 
 
 def _to_datetime(value: Any) -> datetime:
-    """Convert an epoch, ISO string or datetime into a tz-aware datetime."""
+    """Convert an epoch (seconds), ISO string or datetime into a tz-aware IST time."""
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=UTC)
     if isinstance(value, bool):  # guard: bool is an int subclass
@@ -265,6 +308,30 @@ def _format_time(value: datetime) -> str:
     return aware.astimezone(INDIA_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 
+# -- Client construction ---------------------------------------------------
+
+
+def _resolve_access_token(settings: GrowwSettings, groww_api: Any) -> str:
+    """Resolve an access token, preferring TOTP regeneration.
+
+    Raises:
+        ProviderError: If no SDK credentials are configured.
+    """
+    token = settings.totp_token
+    secret = settings.totp_secret
+    if token is not None and secret is not None:
+        import pyotp  # type: ignore[import-not-found]
+
+        code = pyotp.TOTP(secret).now()
+        return str(groww_api.get_access_token(api_key=token, totp=code))
+    if settings.access_token is not None:
+        return settings.access_token
+    raise ProviderError(
+        "Groww SDK auth is not configured: set GROWW_ACCESS_TOKEN, or "
+        "GROWW_TOTP_TOKEN + GROWW_TOTP_SECRET."
+    )
+
+
 def _build_growwapi(settings: GrowwSettings) -> GrowwSDKClient:
     """Build the real ``growwapi`` client, or fail clearly if it is absent."""
     try:
@@ -275,6 +342,5 @@ def _build_growwapi(settings: GrowwSettings) -> GrowwSDKClient:
             "use MARKET_DATA_PROVIDER=groww.",
             details=str(exc),
         ) from exc
-    if not settings.api_key:
-        raise ProviderError("Groww API key is not configured.")
-    return cast("GrowwSDKClient", GrowwAPI(access_token=settings.api_key))
+    access_token = _resolve_access_token(settings, GrowwAPI)
+    return cast("GrowwSDKClient", GrowwAPI(access_token=access_token))

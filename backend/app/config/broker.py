@@ -30,6 +30,19 @@ class GrowwSettings(BaseConfig):
         default=None,
         description="Base32 TOTP seed; required when GROWW_AUTH_MODE=totp.",
     )
+    # --- growwapi SDK credentials (used by MARKET_DATA_PROVIDER=groww_sdk) ---
+    access_token: str | None = Field(
+        default=None,
+        description="Groww SDK daily access token (GROWW_ACCESS_TOKEN).",
+    )
+    totp_token: str | None = Field(
+        default=None,
+        description="Groww SDK API key for TOTP token generation (GROWW_TOTP_TOKEN).",
+    )
+    totp_secret: str | None = Field(
+        default=None,
+        description="Groww SDK TOTP secret; regenerates the token per run.",
+    )
     auth_mode: GrowwAuthMode = Field(
         default="token",
         description=(
@@ -39,7 +52,14 @@ class GrowwSettings(BaseConfig):
         ),
     )
 
-    @field_validator("api_secret", "totp_seed", mode="before")
+    @field_validator(
+        "api_secret",
+        "totp_seed",
+        "access_token",
+        "totp_token",
+        "totp_secret",
+        mode="before",
+    )
     @classmethod
     def _blank_to_none(cls, value: str | None) -> str | None:
         """Treat a blank optional secret as unset.
@@ -134,3 +154,13 @@ class GrowwSettings(BaseConfig):
     def uses_totp(self) -> bool:
         """Return whether the selected mode authenticates with a TOTP."""
         return self.auth_mode == "totp"
+
+    @property
+    def sdk_uses_totp(self) -> bool:
+        """Return whether the SDK provider should regenerate a token via TOTP."""
+        return self.totp_token is not None and self.totp_secret is not None
+
+    @property
+    def sdk_is_configured(self) -> bool:
+        """Return whether the SDK provider has usable credentials."""
+        return self.sdk_uses_totp or self.access_token is not None

@@ -60,10 +60,10 @@ class Settings(BaseSettings):
 
     # --- Providers ---
     market_data_provider: MarketDataBackend = Field(
-        default="groww",
+        default="groww_sdk",
         description=(
-            "Market-data backend: 'groww' (real httpx), 'groww_sdk' (growwapi "
-            "SDK) or 'fake' (offline skeleton)."
+            "Market-data backend: 'groww_sdk' (growwapi SDK, default), 'groww' "
+            "(real httpx) or 'fake' (offline skeleton)."
         ),
     )
 

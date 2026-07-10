@@ -383,7 +383,8 @@ def test_health_provider_surfaces_hard_auth_failure() -> None:
         raise AuthenticationError("Groww rejected credentials.")
 
     settings = Settings(
-        groww=GrowwSettings(api_key="k", auth_mode="totp", totp_seed="AAAA")
+        market_data_provider="groww",
+        groww=GrowwSettings(api_key="k", auth_mode="totp", totp_seed="AAAA"),
     )
     checks = run_health_checks(settings, auth_probe=_fail_probe)
     provider = next(check for check in checks if check.name == "Provider")
@@ -403,7 +404,8 @@ def test_health_provider_reports_authenticated() -> None:
         return None
 
     settings = Settings(
-        groww=GrowwSettings(api_key="k", auth_mode="totp", totp_seed="AAAA")
+        market_data_provider="groww",
+        groww=GrowwSettings(api_key="k", auth_mode="totp", totp_seed="AAAA"),
     )
     checks = run_health_checks(settings, auth_probe=_ok_probe)
     provider = next(check for check in checks if check.name == "Provider")
@@ -426,7 +428,8 @@ def test_health_surfaces_real_groww_http_error() -> None:
         )
 
     settings = Settings(
-        groww=GrowwSettings(api_key="k", auth_mode="key_secret", api_secret="s")
+        market_data_provider="groww",
+        groww=GrowwSettings(api_key="k", auth_mode="key_secret", api_secret="s"),
     )
     checks = run_health_checks(settings, auth_probe=_http_fail)
     provider = next(check for check in checks if check.name == "Provider")
