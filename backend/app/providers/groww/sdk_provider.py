@@ -343,4 +343,5 @@ def _build_growwapi(settings: GrowwSettings) -> GrowwSDKClient:
             details=str(exc),
         ) from exc
     access_token = _resolve_access_token(settings, GrowwAPI)
-    return cast("GrowwSDKClient", GrowwAPI(access_token=access_token))
+    # The SDK constructor takes the token positionally: GrowwAPI(access_token).
+    return cast("GrowwSDKClient", GrowwAPI(access_token))

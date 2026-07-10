@@ -187,7 +187,8 @@ class _FakeGrowwAPI:
     built_with: str | None = None
     exchange_calls: list[dict[str, str]] = []
 
-    def __init__(self, access_token: str) -> None:
+    def __init__(self, access_token: str, /) -> None:
+        # Positional-only: mirrors the real SDK, which rejects access_token=...
         type(self).built_with = access_token
 
     @staticmethod
