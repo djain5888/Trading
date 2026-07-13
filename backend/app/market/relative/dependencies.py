@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from app.config.watchlist import get_watchlist_config
 from app.core.clock import Clock
 from app.market.calendar.dependencies import get_clock
 from app.market.historical.dependencies import get_historical_data_engine
@@ -36,8 +37,14 @@ def build_relative_strength_engine(
 
 @lru_cache(maxsize=1)
 def _engine_singleton() -> RelativeStrengthEngine:
-    """Return the cached relative-strength engine."""
-    return build_relative_strength_engine()
+    """Return the cached RS engine, wired to the benchmark index and sectors."""
+    watchlist = get_watchlist_config()
+    return build_relative_strength_engine(
+        config=RSConfig(
+            index_symbol=watchlist.index_symbol,
+            sector_map=dict(watchlist.sectors),
+        )
+    )
 
 
 def get_relative_strength_engine() -> RelativeStrengthEngine:

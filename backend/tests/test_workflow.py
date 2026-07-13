@@ -106,6 +106,7 @@ class _FakeImportEngine(HistoricalImportEngine):
         self._fail = fail
         self._fail_symbols = fail_symbols
         self._auth_fail = auth_fail
+        self.imported_symbols: list[str] = []
 
     async def import_history(
         self,
@@ -118,6 +119,7 @@ class _FakeImportEngine(HistoricalImportEngine):
         mode: object = None,
         on_progress: object = None,
     ) -> ImportSummary:
+        self.imported_symbols.extend(symbols)
         if self._auth_fail:
             from app.providers.exceptions import AuthenticationError
 
@@ -226,6 +228,23 @@ async def test_morning_workflow_success() -> None:
     assert run.report.market_open is True
     assert run.report.imported_symbols == 2
     assert run.report.failed_symbols == 0
+
+
+async def test_morning_imports_index_benchmark() -> None:
+    """The morning import step also fetches the benchmark index (not counted)."""
+    services = _services()
+    engine = build_workflow_engine(services=services)
+    request = WorkflowRequest(
+        symbols=("AAA", "BBB"), interval=Interval.ONE_MINUTE, history_days=1
+    )
+    run = await engine.run("morning", request)
+
+    assert run.success
+    fake = services.import_engine
+    assert isinstance(fake, _FakeImportEngine)
+    assert "NIFTY" in fake.imported_symbols  # index imported alongside watchlist
+    assert isinstance(run.report, MorningReport)
+    assert run.report.imported_symbols == 2  # index is not a watchlist member
 
 
 async def test_morning_report_surfaces_failed_symbols() -> None:

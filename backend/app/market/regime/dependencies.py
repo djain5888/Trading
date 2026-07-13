@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from app.config.watchlist import get_watchlist_config
 from app.core.clock import Clock
 from app.indicators.dependencies import get_indicator_engine
 from app.indicators.engine import IndicatorEngine
@@ -41,8 +42,10 @@ def build_market_regime_engine(
 
 @lru_cache(maxsize=1)
 def _engine_singleton() -> MarketRegimeEngine:
-    """Return the cached market-regime engine."""
-    return build_market_regime_engine()
+    """Return the cached market-regime engine, wired to the benchmark index."""
+    return build_market_regime_engine(
+        config=RegimeConfig(index_symbol=get_watchlist_config().index_symbol)
+    )
 
 
 def get_market_regime_engine() -> MarketRegimeEngine:

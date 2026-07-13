@@ -66,6 +66,10 @@ class Settings(BaseSettings):
             "(real httpx) or 'fake' (offline skeleton)."
         ),
     )
+    watchlist_file: str | None = Field(
+        default=None,
+        description="Optional JSON file overriding the default watchlist/sectors.",
+    )
 
     # --- Infrastructure groups ---
     postgres: PostgresSettings = Field(default_factory=PostgresSettings)

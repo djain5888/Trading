@@ -12,6 +12,7 @@ import asyncio
 import typer
 
 from app.cli.render import render_health, render_run, render_version
+from app.config.watchlist import get_watchlist_config
 from app.core.logging import configure_logging
 from app.market.enums import Exchange, Interval
 from app.workflow.diagnostics import (
@@ -29,6 +30,11 @@ app = typer.Typer(help="Titan — AI quant trading platform CLI.", no_args_is_he
 def _resolve_services() -> WorkflowServices:
     """Resolve services through DI (overridable in tests)."""
     return WorkflowServices.resolve()
+
+
+def _watchlist(symbol: list[str]) -> tuple[str, ...]:
+    """Return the given symbols, or the configured default watchlist if none."""
+    return tuple(symbol) if symbol else get_watchlist_config().symbols
 
 
 def _run_workflow(name: str, request: WorkflowRequest) -> WorkflowRun:
@@ -70,7 +76,7 @@ def morning(
 ) -> None:
     """Run the full pre-market pipeline and print the morning report."""
     request = WorkflowRequest(
-        symbols=tuple(symbol),
+        symbols=_watchlist(symbol),
         exchange=exchange,
         interval=interval,
         history_days=history_days,
@@ -87,7 +93,7 @@ def import_(
 ) -> None:
     """Update historical candles for the given symbols."""
     request = WorkflowRequest(
-        symbols=tuple(symbol),
+        symbols=_watchlist(symbol),
         exchange=exchange,
         interval=interval,
         history_days=history_days,
@@ -104,7 +110,7 @@ def indicators(
 ) -> None:
     """Refresh indicators for the given symbols."""
     request = WorkflowRequest(
-        symbols=tuple(symbol),
+        symbols=_watchlist(symbol),
         exchange=exchange,
         interval=interval,
         history_days=history_days,
@@ -123,7 +129,7 @@ def scan(
 ) -> None:
     """Run scanners and print ranked candidates."""
     request = WorkflowRequest(
-        symbols=tuple(symbol),
+        symbols=_watchlist(symbol),
         scanners=tuple(scanner),
         exchange=exchange,
         interval=interval,
@@ -142,7 +148,7 @@ def regime(
 ) -> None:
     """Classify the market regime (trend, volatility and breadth)."""
     request = WorkflowRequest(
-        symbols=tuple(symbol),
+        symbols=_watchlist(symbol),
         exchange=exchange,
         interval=interval,
         history_days=history_days,
@@ -159,7 +165,7 @@ def sectors(
 ) -> None:
     """Rank sectors by strength across the watchlist."""
     request = WorkflowRequest(
-        symbols=tuple(symbol),
+        symbols=_watchlist(symbol),
         exchange=exchange,
         interval=interval,
         history_days=history_days,
@@ -176,7 +182,7 @@ def rs(
 ) -> None:
     """Score relative strength versus the market and each stock's sector."""
     request = WorkflowRequest(
-        symbols=tuple(symbol),
+        symbols=_watchlist(symbol),
         exchange=exchange,
         interval=interval,
         history_days=history_days,

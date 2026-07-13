@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from datetime import datetime, timedelta
 from typing import ClassVar
 
+from app.core.logging import get_logger
 from app.market.historical.models import SeriesKey
 from app.market.live.models import CollectorConfig
 from app.market.regime.models import RegimeReport
@@ -30,6 +31,8 @@ from app.workflow.models import (
     SectorWorkflowReport,
 )
 from app.workflow.services import WorkflowServices
+
+logger = get_logger(__name__)
 
 
 def _resolve_range(
@@ -199,7 +202,35 @@ class MorningWorkflow(Workflow):
                 failed.append(symbol)
             else:
                 imported.append(symbol)
+        await self._import_index(context, start, end)
         return imported, failed
+
+    async def _import_index(
+        self, context: WorkflowContext, start: datetime, end: datetime
+    ) -> None:
+        """Import the benchmark index so regime and RS have a comparison.
+
+        Best-effort: a failed index import is logged and left to the regime/RS
+        engines' graceful "unavailable"/neutral paths. An authentication failure
+        still propagates and aborts the run.
+        """
+        request = context.request
+        regime_config = context.services.regime_engine.config
+        index = regime_config.index_symbol
+        if not index or index in {symbol.strip().upper() for symbol in request.symbols}:
+            return
+        summary = await context.services.import_engine.import_history(
+            [index],
+            request.interval,
+            start,
+            end,
+            regime_config.index_exchange,
+            mode=request.import_mode,
+        )
+        if summary.failed_requests > 0:
+            logger.warning(
+                "Benchmark index '%s' import failed; regime/RS will degrade.", index
+            )
 
     async def _indicators(
         self,

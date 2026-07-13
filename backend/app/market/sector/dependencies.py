@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+from app.config.watchlist import get_watchlist_config
 from app.core.clock import Clock
 from app.indicators.dependencies import get_indicator_engine
 from app.indicators.engine import IndicatorEngine
@@ -41,8 +42,10 @@ def build_sector_strength_engine(
 
 @lru_cache(maxsize=1)
 def _engine_singleton() -> SectorStrengthEngine:
-    """Return the cached sector-strength engine."""
-    return build_sector_strength_engine()
+    """Return the cached sector-strength engine, wired to the sector map."""
+    return build_sector_strength_engine(
+        config=SectorConfig(sector_map=dict(get_watchlist_config().sectors))
+    )
 
 
 def get_sector_strength_engine() -> SectorStrengthEngine:

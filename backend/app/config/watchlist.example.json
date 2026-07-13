@@ -1,0 +1,29 @@
+{
+  "index_symbol": "NIFTY",
+  "symbols": [
+    "RELIANCE",
+    "ONGC",
+    "TCS",
+    "INFY",
+    "HDFCBANK",
+    "ICICIBANK",
+    "SBIN",
+    "ITC",
+    "HINDUNILVR",
+    "MARUTI",
+    "TATAMOTORS"
+  ],
+  "sectors": {
+    "RELIANCE": "ENERGY",
+    "ONGC": "ENERGY",
+    "TCS": "IT",
+    "INFY": "IT",
+    "HDFCBANK": "BANKING",
+    "ICICIBANK": "BANKING",
+    "SBIN": "BANKING",
+    "ITC": "FMCG",
+    "HINDUNILVR": "FMCG",
+    "MARUTI": "AUTO",
+    "TATAMOTORS": "AUTO"
+  }
+}
