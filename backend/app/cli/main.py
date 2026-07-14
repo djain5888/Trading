@@ -11,7 +11,7 @@ import asyncio
 
 import typer
 
-from app.cli.render import render_health, render_run, render_version
+from app.cli.render import render_health, render_paper, render_run, render_version
 from app.config.watchlist import get_watchlist_config
 from app.core.logging import configure_logging
 from app.market.enums import Exchange, Interval
@@ -222,6 +222,19 @@ def collect(
         collect_cycles=cycles,
     )
     _emit(_run_workflow("collect", request))
+
+
+@app.command()
+def paper(
+    history: bool = typer.Option(
+        False, "--history", help="Include the closed-trade history."
+    ),
+) -> None:
+    """Show paper-trading performance (open positions, win rate, P&L)."""
+    services = _resolve_services()
+    configure_logging(services.settings)
+    report = asyncio.run(services.paper_engine.report())
+    typer.echo(render_paper(report, history=history))
 
 
 @app.command()

@@ -33,6 +33,8 @@ from app.market.relative.dependencies import get_relative_strength_engine
 from app.market.relative.engine import RelativeStrengthEngine
 from app.market.sector.dependencies import get_sector_strength_engine
 from app.market.sector.engine import SectorStrengthEngine
+from app.paper.dependencies import get_paper_trading_engine
+from app.paper.engine import PaperTradingEngine
 from app.providers.base import MarketDataProvider
 from app.providers.dependencies import get_market_data_provider
 from app.scanner.dependencies import get_scanner_engine
@@ -58,6 +60,7 @@ class WorkflowServices:
     sector_engine: SectorStrengthEngine
     relative_engine: RelativeStrengthEngine
     strategy_engine: StrategyEngine
+    paper_engine: PaperTradingEngine
     provider: MarketDataProvider
     collector_factory: CollectorFactory
 
@@ -76,6 +79,7 @@ class WorkflowServices:
             sector_engine=get_sector_strength_engine(),
             relative_engine=get_relative_strength_engine(),
             strategy_engine=get_strategy_engine(),
+            paper_engine=get_paper_trading_engine(),
             provider=get_market_data_provider(),
             collector_factory=build_live_market_collector,
         )

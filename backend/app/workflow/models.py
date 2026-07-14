@@ -12,6 +12,7 @@ from app.market.historical.importer.models import ImportMode
 from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
+from app.paper.models import PaperReport
 from app.scanner.models import ScannerResult
 from app.strategy.models import StrategyReport
 
@@ -105,6 +106,9 @@ class MorningReport(WorkflowReport):
     )
     strategies: StrategyReport | None = Field(
         default=None, description="Named strategy setups, if produced."
+    )
+    paper: PaperReport | None = Field(
+        default=None, description="Paper-trading performance, if produced."
     )
     scanner_summary: dict[str, int] = Field(
         default_factory=dict, description="Candidate count per scanner."

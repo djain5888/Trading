@@ -16,6 +16,7 @@ from app.market.live.models import CollectorConfig
 from app.market.regime.models import RegimeReport
 from app.market.relative.models import NEUTRAL_RS, RSReport
 from app.market.sector.models import SectorReport
+from app.paper.models import PaperReport
 from app.scanner.engine import ScannerEngine
 from app.scanner.models import ScannerResult
 from app.strategy.models import StrategyReport
@@ -96,6 +97,9 @@ class MorningWorkflow(Workflow):
             "Name strategy setups",
             self._strategies(context, end, raw, regime, sectors, relative),
         )
+        paper = await context.run_step(
+            "Update paper trades", self._paper(context, end, strategies)
+        )
         return await context.run_step(
             "Generate report",
             self._report(
@@ -108,6 +112,7 @@ class MorningWorkflow(Workflow):
                 sectors,
                 relative,
                 strategies,
+                paper,
                 raw,
                 ranked,
             ),
@@ -124,6 +129,7 @@ class MorningWorkflow(Workflow):
         sectors: SectorReport,
         relative: RSReport,
         strategies: StrategyReport,
+        paper: PaperReport,
         raw: list[ScannerResult],
         ranked: list[ScannerResult],
     ) -> MorningReport:
@@ -143,9 +149,22 @@ class MorningWorkflow(Workflow):
             sectors=sectors,
             relative=relative,
             strategies=strategies,
+            paper=paper,
             scanner_summary=summary,
             top_results=tuple(ranked),
             generated_at=context.services.clock.now(),
+        )
+
+    async def _paper(
+        self, context: WorkflowContext, end: datetime, strategies: StrategyReport
+    ) -> PaperReport:
+        """Update open paper trades and open new ones from today's top setups."""
+        request = context.request
+        return await context.services.paper_engine.run(
+            strategies.setups,
+            exchange=request.exchange,
+            interval=request.interval,
+            end=end,
         )
 
     async def _strategies(

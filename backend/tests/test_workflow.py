@@ -34,6 +34,8 @@ from app.market.models import (
 from app.market.regime.engine import MarketRegimeEngine
 from app.market.relative.engine import RelativeStrengthEngine
 from app.market.sector.engine import SectorStrengthEngine
+from app.paper.dependencies import build_paper_trading_engine
+from app.paper.memory import InMemoryPaperTradeRepository
 from app.providers.base import MarketDataProvider
 from app.scanner.dependencies import get_scanner_registry
 from app.scanner.engine import ScannerEngine
@@ -176,6 +178,11 @@ def _services(
     sector_engine = SectorStrengthEngine(data_engine, indicator_engine, clock)
     relative_engine = RelativeStrengthEngine(data_engine, clock)
     strategy_engine = StrategyEngine(data_engine, indicator_engine, clock)
+    paper_engine = build_paper_trading_engine(
+        repository=InMemoryPaperTradeRepository(),
+        data_engine=data_engine,
+        clock=clock,
+    )
 
     def _collector_factory(config: CollectorConfig) -> LiveMarketCollector:
         return LiveMarketCollector(
@@ -205,6 +212,7 @@ def _services(
         sector_engine=sector_engine,
         relative_engine=relative_engine,
         strategy_engine=strategy_engine,
+        paper_engine=paper_engine,
         provider=_StubProvider(),
         collector_factory=_collector_factory,
     )
@@ -223,7 +231,7 @@ async def test_morning_workflow_success() -> None:
 
     assert run.success
     assert run.error is None
-    assert len(run.steps) == 10
+    assert len(run.steps) == 11
     assert all(step.ok for step in run.steps)
     assert isinstance(run.report, MorningReport)
     assert run.report.stocks_scanned == 2

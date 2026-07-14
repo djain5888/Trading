@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
+from app.paper.models import PaperReport, PaperTrade
 from app.scanner.models import ScannerResult
 from app.strategy.models import StrategyReport
 from app.workflow.diagnostics import HealthCheck, VersionInfo
@@ -120,8 +121,72 @@ def _render_morning(report: MorningReport) -> list[str]:
     lines.extend(_render_results(report.top_results, report.relative))
     lines.append("Strategy Setups:")
     lines.extend(_render_setups(report.strategies))
+    lines.append(f"Paper Book:          {_paper_summary(report.paper)}")
     lines.append(f"Generated At:        {report.generated_at.isoformat()}")
     return lines
+
+
+def _paper_summary(report: PaperReport | None) -> str:
+    """Format a one-line paper-book summary for the morning report."""
+    if report is None:
+        return "unavailable"
+    return (
+        f"equity={report.equity:.0f}  open={len(report.open_positions)}  "
+        f"closed={len(report.closed_trades)}  win={report.win_rate:.0f}%  "
+        f"pnl={report.total_pnl:+.0f}  pf={report.profit_factor:.2f}"
+    )
+
+
+def render_paper(report: PaperReport, *, history: bool = False) -> str:
+    """Render the paper-trading performance report (``--history`` adds closed)."""
+    lines = [
+        "===== Titan Paper Book =====",
+        f"Starting Capital: {report.starting_capital:.0f}",
+        f"Equity:           {report.equity:.2f}",
+        f"Total P&L:        {report.total_pnl:+.2f} "
+        f"(realized {report.realized_pnl:+.2f}, open {report.open_pnl:+.2f})",
+        f"Win Rate:         {report.win_rate:.1f}%  "
+        f"({report.wins}W / {report.losses}L)  PF={report.profit_factor:.2f}",
+        f"Avg Win/Loss:     {report.avg_win:+.2f} / {report.avg_loss:+.2f}",
+        f"Open Positions ({len(report.open_positions)}):",
+    ]
+    lines.extend(_render_positions(report.open_positions))
+    if report.per_strategy:
+        lines.append("Per-Strategy:")
+        for stats in report.per_strategy:
+            lines.append(
+                f"  {stats.strategy:<10} trades={stats.trades} "
+                f"win={stats.win_rate:.0f}% pnl={stats.total_pnl:+.2f}"
+            )
+    if history:
+        lines.append(f"Closed Trades ({len(report.closed_trades)}):")
+        lines.extend(_render_closed(report.closed_trades))
+    lines.append(f"Generated: {report.generated_at.isoformat()}")
+    return "\n".join(lines)
+
+
+def _render_positions(trades: tuple[PaperTrade, ...]) -> list[str]:
+    """Render open paper positions (mark-to-market)."""
+    if not trades:
+        return ["  (none)"]
+    return [
+        f"  {t.symbol:<12} {t.strategy:<9} entry={t.entry_price:.2f} "
+        f"stop={t.stop_price:.2f} target={t.target_price:.2f} "
+        f"mark={t.last_price:.2f} pnl={t.pnl:+.2f}"
+        for t in trades
+    ]
+
+
+def _render_closed(trades: tuple[PaperTrade, ...]) -> list[str]:
+    """Render closed paper trades with their exit reason."""
+    if not trades:
+        return ["  (none)"]
+    return [
+        f"  {t.symbol:<12} {t.strategy:<9} "
+        f"{t.exit_reason.value if t.exit_reason else '?':<7} "
+        f"entry={t.entry_price:.2f} exit={t.exit_price or 0:.2f} pnl={t.pnl:+.2f}"
+        for t in trades
+    ]
 
 
 def _render_setups(report: StrategyReport | None, limit: int = 10) -> list[str]:
