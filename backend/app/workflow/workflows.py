@@ -18,6 +18,7 @@ from app.market.relative.models import NEUTRAL_RS, RSReport
 from app.market.sector.models import SectorReport
 from app.scanner.engine import ScannerEngine
 from app.scanner.models import ScannerResult
+from app.strategy.models import StrategyReport
 from app.workflow.base import Workflow
 from app.workflow.context import WorkflowContext
 from app.workflow.models import (
@@ -29,6 +30,7 @@ from app.workflow.models import (
     RSWorkflowReport,
     ScanReport,
     SectorWorkflowReport,
+    StrategyWorkflowReport,
 )
 from app.workflow.services import WorkflowServices
 
@@ -90,6 +92,10 @@ class MorningWorkflow(Workflow):
         ranked = await context.run_step(
             "Rank results", self._rank(raw, request.top_n, relative)
         )
+        strategies = await context.run_step(
+            "Name strategy setups",
+            self._strategies(context, end, raw, regime, sectors, relative),
+        )
         return await context.run_step(
             "Generate report",
             self._report(
@@ -101,6 +107,7 @@ class MorningWorkflow(Workflow):
                 regime,
                 sectors,
                 relative,
+                strategies,
                 raw,
                 ranked,
             ),
@@ -116,6 +123,7 @@ class MorningWorkflow(Workflow):
         regime: RegimeReport,
         sectors: SectorReport,
         relative: RSReport,
+        strategies: StrategyReport,
         raw: list[ScannerResult],
         ranked: list[ScannerResult],
     ) -> MorningReport:
@@ -134,9 +142,32 @@ class MorningWorkflow(Workflow):
             regime=regime,
             sectors=sectors,
             relative=relative,
+            strategies=strategies,
             scanner_summary=summary,
             top_results=tuple(ranked),
             generated_at=context.services.clock.now(),
+        )
+
+    async def _strategies(
+        self,
+        context: WorkflowContext,
+        end: datetime,
+        raw: list[ScannerResult],
+        regime: RegimeReport,
+        sectors: SectorReport,
+        relative: RSReport,
+    ) -> StrategyReport:
+        """Name strategy setups from scanner hits and market context."""
+        request = context.request
+        return await context.services.strategy_engine.analyze(
+            request.symbols,
+            exchange=request.exchange,
+            interval=request.interval,
+            end=end,
+            scan_results=raw,
+            regime=regime,
+            sectors=sectors,
+            relative=relative,
         )
 
     async def _regime(self, context: WorkflowContext, end: datetime) -> RegimeReport:
@@ -459,6 +490,59 @@ class RelativeStrengthWorkflow(Workflow):
             ),
         )
         return RSWorkflowReport(relative=report)
+
+
+class StrategyWorkflow(Workflow):
+    """Names strategy setups across the watchlist with full market context."""
+
+    name: ClassVar[str] = "strategies"
+
+    async def run(self, context: WorkflowContext) -> StrategyWorkflowReport:
+        """Compute the context reports, then name and rank strategy setups."""
+        services = context.services
+        request = context.request
+        start, end = _resolve_range(
+            services, request.start, request.end, request.history_days
+        )
+        keys = [
+            SeriesKey(
+                symbol=symbol, exchange=request.exchange, interval=request.interval
+            )
+            for symbol in request.symbols
+        ]
+        regime = await services.regime_engine.analyze(
+            request.symbols,
+            exchange=request.exchange,
+            interval=request.interval,
+            end=end,
+        )
+        sectors = await services.sector_engine.analyze(
+            request.symbols,
+            exchange=request.exchange,
+            interval=request.interval,
+            end=end,
+        )
+        relative = await services.relative_engine.analyze(
+            request.symbols,
+            exchange=request.exchange,
+            interval=request.interval,
+            end=end,
+        )
+        raw = await services.scanner_engine.run_all(keys, start, end, dedupe=False)
+        report = await context.run_step(
+            "Name strategy setups",
+            services.strategy_engine.analyze(
+                request.symbols,
+                exchange=request.exchange,
+                interval=request.interval,
+                end=end,
+                scan_results=raw,
+                regime=regime,
+                sectors=sectors,
+                relative=relative,
+            ),
+        )
+        return StrategyWorkflowReport(strategies=report)
 
 
 class CollectWorkflow(Workflow):

@@ -13,6 +13,7 @@ from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
 from app.scanner.models import ScannerResult
+from app.strategy.models import StrategyReport
 
 #: Default indicators refreshed by the morning workflow.
 _DEFAULT_INDICATORS = ("sma", "ema", "rsi", "macd", "atr")
@@ -102,6 +103,9 @@ class MorningReport(WorkflowReport):
     relative: RSReport | None = Field(
         default=None, description="Relative-strength scoring, if produced."
     )
+    strategies: StrategyReport | None = Field(
+        default=None, description="Named strategy setups, if produced."
+    )
     scanner_summary: dict[str, int] = Field(
         default_factory=dict, description="Candidate count per scanner."
     )
@@ -134,6 +138,12 @@ class RSWorkflowReport(WorkflowReport):
     """Standalone relative-strength report for the ``rs`` workflow."""
 
     relative: RSReport = Field(description="The relative-strength scoring.")
+
+
+class StrategyWorkflowReport(WorkflowReport):
+    """Standalone strategy report for the ``strategies`` workflow."""
+
+    strategies: StrategyReport = Field(description="The named strategy setups.")
 
 
 class ImportReport(WorkflowReport):

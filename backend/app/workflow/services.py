@@ -37,6 +37,8 @@ from app.providers.base import MarketDataProvider
 from app.providers.dependencies import get_market_data_provider
 from app.scanner.dependencies import get_scanner_engine
 from app.scanner.engine import ScannerEngine
+from app.strategy.dependencies import get_strategy_engine
+from app.strategy.engine import StrategyEngine
 
 CollectorFactory = Callable[[CollectorConfig], LiveMarketCollector]
 
@@ -55,6 +57,7 @@ class WorkflowServices:
     regime_engine: MarketRegimeEngine
     sector_engine: SectorStrengthEngine
     relative_engine: RelativeStrengthEngine
+    strategy_engine: StrategyEngine
     provider: MarketDataProvider
     collector_factory: CollectorFactory
 
@@ -72,6 +75,7 @@ class WorkflowServices:
             regime_engine=get_market_regime_engine(),
             sector_engine=get_sector_strength_engine(),
             relative_engine=get_relative_strength_engine(),
+            strategy_engine=get_strategy_engine(),
             provider=get_market_data_provider(),
             collector_factory=build_live_market_collector,
         )

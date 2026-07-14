@@ -191,6 +191,23 @@ def rs(
 
 
 @app.command()
+def strategies(
+    symbol: list[str] = typer.Option([], "--symbol", "-s", help="Watchlist symbol."),
+    exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
+    interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
+    history_days: int = typer.Option(400, help="Days of history to consider."),
+) -> None:
+    """Name strategy setups (breakout, pullback, momentum) with confidence and RR."""
+    request = WorkflowRequest(
+        symbols=_watchlist(symbol),
+        exchange=exchange,
+        interval=interval,
+        history_days=history_days,
+    )
+    _emit(_run_workflow("strategies", request))
+
+
+@app.command()
 def collect(
     symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to collect."),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),

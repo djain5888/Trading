@@ -10,6 +10,7 @@ from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
 from app.scanner.models import ScannerResult
+from app.strategy.models import StrategyReport
 from app.workflow.diagnostics import HealthCheck, VersionInfo
 from app.workflow.models import (
     CollectReport,
@@ -20,6 +21,7 @@ from app.workflow.models import (
     RSWorkflowReport,
     ScanReport,
     SectorWorkflowReport,
+    StrategyWorkflowReport,
     WorkflowRun,
 )
 
@@ -82,6 +84,8 @@ def _render_report(report: object) -> list[str]:
         return _render_sectors(report.sectors)
     if isinstance(report, RSWorkflowReport):
         return _render_rs(report.relative)
+    if isinstance(report, StrategyWorkflowReport):
+        return _render_strategies(report.strategies)
     if isinstance(report, IndicatorsReport):
         return ["", f"Computed: {report.computed}  Skipped: {report.skipped}"]
     if isinstance(report, CollectReport):
@@ -114,7 +118,35 @@ def _render_morning(report: MorningReport) -> list[str]:
             lines.append(f"  {name}: {count}")
     lines.append(f"Top {len(report.top_results)} Ranked Stocks:")
     lines.extend(_render_results(report.top_results, report.relative))
+    lines.append("Strategy Setups:")
+    lines.extend(_render_setups(report.strategies))
     lines.append(f"Generated At:        {report.generated_at.isoformat()}")
+    return lines
+
+
+def _render_setups(report: StrategyReport | None, limit: int = 10) -> list[str]:
+    """Render the top named strategy setups (symbol, strategy, confidence, RR)."""
+    if report is None or not report.available:
+        return ["  (strategies unavailable)"]
+    if not report.setups:
+        return ["  (no setups)"]
+    return [
+        f"  {index:>2}. {setup.symbol:<12} {setup.strategy:<9} "
+        f"conf={setup.confidence:5.1f} RR={setup.reward_risk:.1f} "
+        f"entry={setup.entry:.2f} stop={setup.stop:.2f} target={setup.target:.2f}"
+        for index, setup in enumerate(report.setups[:limit], start=1)
+    ]
+
+
+def _render_strategies(report: StrategyReport) -> list[str]:
+    """Render a standalone strategy report."""
+    lines = ["", "===== Titan Strategy Setups ====="]
+    if not report.available:
+        lines.append("Strategies: unavailable")
+        lines.append(f"Detail:     {report.detail}")
+    else:
+        lines.extend(_render_setups(report, limit=len(report.setups)))
+    lines.append(f"Generated:  {report.generated_at.isoformat()}")
     return lines
 
 

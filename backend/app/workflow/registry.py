@@ -15,6 +15,7 @@ from app.workflow.workflows import (
     RelativeStrengthWorkflow,
     ScanWorkflow,
     SectorWorkflow,
+    StrategyWorkflow,
 )
 
 WorkflowFactory = Callable[[], Workflow]
@@ -57,5 +58,6 @@ def default_registry() -> WorkflowRegistry:
     registry.register("regime", RegimeWorkflow)
     registry.register("sectors", SectorWorkflow)
     registry.register("rs", RelativeStrengthWorkflow)
+    registry.register("strategies", StrategyWorkflow)
     registry.register("collect", CollectWorkflow)
     return registry
