@@ -1,0 +1,408 @@
+"""The backtesting engine: a walk-forward replay of the live strategy path.
+
+For each trading day the engine freezes a :class:`LookaheadGuard` at that date
+and runs the **same** :class:`StrategyEngine` and :class:`MarketRegimeEngine`
+the live pipeline uses, reading only data up to that day. Setups discovered at a
+day's close are filled at the *next* day's open (never same-bar), sized by the
+paper book's 1%-risk rules, and exited on stop, target or timeout — with gap-aware
+fills and realistic costs. It measures expectancy; it never places a real order.
+
+Determinism: no wall-clock or randomness enters the simulation. The trading
+calendar, the stored candles and the strategy code path are all deterministic,
+so the same data and dates always produce the same report.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta
+
+from app.backtest import metrics
+from app.backtest.guard import LookaheadGuard
+from app.backtest.models import BacktestConfig, BacktestReport, BacktestTrade
+from app.core.logging import get_logger
+from app.core.timezone import INDIA_TZ
+from app.market.calendar.service import MarketCalendarService
+from app.market.historical.models import Candle, SeriesKey
+from app.market.regime.engine import MarketRegimeEngine
+from app.market.regime.models import RegimeReport
+from app.paper.models import ExitReason
+from app.strategy.engine import StrategyEngine
+from app.strategy.models import StrategySetup
+
+logger = get_logger(__name__)
+
+
+@dataclass
+class _OpenPosition:
+    """A live simulated position (mutable during the walk)."""
+
+    symbol: str
+    strategy: str
+    regime: str | None
+    entry_date: date
+    entry_price: float
+    stop: float
+    target: float
+    size: float
+
+
+@dataclass(frozen=True)
+class _PendingSetup:
+    """A setup awaiting a next-day-open fill, tagged with the entry regime."""
+
+    setup: StrategySetup
+    regime: str | None
+
+
+class BacktestEngine:
+    """Replays strategy setups over history and reports their expectancy."""
+
+    def __init__(
+        self,
+        *,
+        data: LookaheadGuard,
+        strategy_engine: StrategyEngine,
+        regime_engine: MarketRegimeEngine,
+        calendar: MarketCalendarService,
+        config: BacktestConfig | None = None,
+    ) -> None:
+        """Initialise the engine.
+
+        Args:
+            data: The look-ahead-guarded data view shared by the sub-engines.
+            strategy_engine: The live strategy engine, wired to ``data``.
+            regime_engine: The live regime engine, wired to ``data``.
+            calendar: Trading-calendar authority for the replay days.
+            config: Market, risk and cost configuration.
+        """
+        self._data = data
+        self._strategy = strategy_engine
+        self._regime = regime_engine
+        self._calendar = calendar
+        self._config = config or BacktestConfig()
+
+    @property
+    def config(self) -> BacktestConfig:
+        """Return the engine's configuration."""
+        return self._config
+
+    async def run(
+        self, symbols: Sequence[str], start: date, end: date
+    ) -> BacktestReport:
+        """Replay ``[start, end]`` and return the measured expectancy.
+
+        Args:
+            symbols: The trading universe.
+            start: First calendar date to replay (inclusive).
+            end: Last calendar date to replay (inclusive).
+
+        Returns:
+            A :class:`BacktestReport` of the run.
+
+        Raises:
+            ValueError: If ``end`` precedes ``start``.
+        """
+        if end < start:
+            raise ValueError("Backtest 'end' must not precede 'start'.")
+        universe = tuple(dict.fromkeys(s.strip().upper() for s in symbols if s.strip()))
+        days = self._trading_days(start, end)
+
+        open_positions: list[_OpenPosition] = []
+        pending: list[_PendingSetup] = []
+        closed: list[BacktestTrade] = []
+        realized = 0.0
+
+        for day in days:
+            self._data.freeze_at(day)
+            realized += await self._exit_day(open_positions, closed, day)
+            await self._open_pending(pending, open_positions, day, realized)
+            regime = await self._classify_regime(universe, day)
+            report = await self._strategy.analyze(
+                universe,
+                exchange=self._config.exchange,
+                interval=self._config.interval,
+                end=self._eod(day),
+                regime=regime.report,
+            )
+            pending = [
+                _PendingSetup(setup=s, regime=regime.label) for s in report.setups
+            ]
+
+        realized += await self._finalize(open_positions, closed, days)
+        return self._build_report(universe, start, end, closed, realized)
+
+    # -- Daily steps -------------------------------------------------------
+
+    async def _exit_day(
+        self,
+        open_positions: list[_OpenPosition],
+        closed: list[BacktestTrade],
+        day: date,
+    ) -> float:
+        """Settle exits for positions opened before ``day``; return realized P&L."""
+        realized = 0.0
+        survivors: list[_OpenPosition] = []
+        for position in open_positions:
+            trade = await self._try_exit(position, day, force=False)
+            if trade is None:
+                survivors.append(position)
+            else:
+                closed.append(trade)
+                realized += trade.net_pnl
+        open_positions[:] = survivors
+        return realized
+
+    async def _open_pending(
+        self,
+        pending: Sequence[_PendingSetup],
+        open_positions: list[_OpenPosition],
+        day: date,
+        realized: float,
+    ) -> None:
+        """Fill yesterday's setups at today's open, respecting the risk limits."""
+        equity = self._config.paper.starting_capital + realized
+        held = {position.symbol for position in open_positions}
+        for item in pending:  # already ranked best-first by the strategy engine
+            if len(open_positions) >= self._config.paper.max_positions:
+                break
+            setup = item.setup
+            symbol = setup.symbol.strip().upper()
+            if symbol in held or setup.confidence < self._config.paper.min_confidence:
+                continue
+            if not (setup.stop < setup.entry < setup.target):
+                continue
+            candle = await self._day_candle(symbol, day)
+            if candle is None:
+                continue
+            entry = self._entry_fill(float(candle.open))
+            if not (setup.stop < entry < setup.target):
+                continue  # opened past the stop/target — no valid long to take
+            size = self._size(equity, entry, setup.stop)
+            if size <= 0:
+                continue
+            open_positions.append(
+                _OpenPosition(
+                    symbol=symbol,
+                    strategy=setup.strategy,
+                    regime=item.regime,
+                    entry_date=day,
+                    entry_price=entry,
+                    stop=setup.stop,
+                    target=setup.target,
+                    size=size,
+                )
+            )
+            held.add(symbol)
+
+    async def _finalize(
+        self,
+        open_positions: list[_OpenPosition],
+        closed: list[BacktestTrade],
+        days: Sequence[date],
+    ) -> float:
+        """Force-close any positions still open at the end of the window."""
+        if not days:
+            return 0.0
+        last = days[-1]
+        self._data.freeze_at(last)
+        realized = 0.0
+        for position in open_positions:
+            trade = await self._try_exit(position, last, force=True)
+            if trade is not None:
+                closed.append(trade)
+                realized += trade.net_pnl
+        open_positions.clear()
+        return realized
+
+    # -- Exit logic (gap-aware, stop-before-target) ------------------------
+
+    async def _try_exit(
+        self, position: _OpenPosition, day: date, *, force: bool
+    ) -> BacktestTrade | None:
+        """Return a closed trade if an exit level is hit on ``day``, else ``None``.
+
+        Worst case first: a gap through the stop fills at the (worse) open, not
+        the stop; only then is an intraday stop, then target, then timeout
+        considered. ``force`` closes an unresolved position at the day's close.
+        """
+        candle = await self._day_candle(position.symbol, day)
+        if candle is None:
+            if force:  # no candle at the window end — close flat at the entry price
+                return self._close(
+                    position, day, position.entry_price, ExitReason.TIMEOUT
+                )
+            return None
+        if candle.timestamp.date() <= position.entry_date and not force:
+            return None  # never exit on the entry bar (hold the open day)
+        open_p, low, high, close = (
+            float(candle.open),
+            float(candle.low),
+            float(candle.high),
+            float(candle.close),
+        )
+        if open_p <= position.stop:
+            return self._close(position, day, open_p, ExitReason.STOP)
+        if low <= position.stop:
+            return self._close(position, day, position.stop, ExitReason.STOP)
+        if open_p >= position.target:
+            return self._close(position, day, open_p, ExitReason.TARGET)
+        if high >= position.target:
+            return self._close(position, day, position.target, ExitReason.TARGET)
+        held_days = (day - position.entry_date).days
+        if force or held_days >= self._config.paper.max_holding_days:
+            return self._close(position, day, close, ExitReason.TIMEOUT)
+        return None
+
+    def _close(
+        self, position: _OpenPosition, day: date, level: float, reason: ExitReason
+    ) -> BacktestTrade:
+        """Build the closed-trade record, net of slippage and charges."""
+        exit_fill = self._exit_fill(level)
+        gross = (exit_fill - position.entry_price) * position.size
+        charges = self._charges(
+            position.entry_price * position.size, exit_fill * position.size
+        )
+        net = gross - charges
+        risk_amount = (position.entry_price - position.stop) * position.size
+        r_multiple = net / risk_amount if risk_amount > 0 else 0.0
+        return BacktestTrade(
+            symbol=position.symbol,
+            strategy=position.strategy,
+            regime=position.regime,
+            entry_date=position.entry_date,
+            exit_date=day,
+            entry_price=round(position.entry_price, 4),
+            exit_price=round(exit_fill, 4),
+            stop_price=round(position.stop, 4),
+            target_price=round(position.target, 4),
+            size=position.size,
+            exit_reason=reason,
+            gross_pnl=round(gross, 2),
+            costs=round(charges, 2),
+            net_pnl=round(net, 2),
+            r_multiple=round(r_multiple, 3),
+        )
+
+    # -- Cost model --------------------------------------------------------
+
+    def _entry_fill(self, raw_open: float) -> float:
+        """Apply entry slippage (a buy fills higher)."""
+        return raw_open * (1.0 + self._config.costs.slippage_pct / 100.0)
+
+    def _exit_fill(self, level: float) -> float:
+        """Apply exit slippage (a sell fills lower)."""
+        return level * (1.0 - self._config.costs.slippage_pct / 100.0)
+
+    def _charges(self, entry_notional: float, exit_notional: float) -> float:
+        """Return brokerage/STT charges levied on both sides' notional."""
+        return (entry_notional + exit_notional) * self._config.costs.charge_pct / 100.0
+
+    def _size(self, equity: float, entry: float, stop: float) -> float:
+        """Return the size risking ``risk_pct`` of equity to the stop (paper rule)."""
+        risk_per_share = entry - stop
+        if risk_per_share <= 0:
+            return 0.0
+        return round(equity * (self._config.paper.risk_pct / 100.0) / risk_per_share, 4)
+
+    # -- Regime tagging ----------------------------------------------------
+
+    async def _classify_regime(
+        self, universe: Sequence[str], day: date
+    ) -> _RegimeAtEntry:
+        """Classify the regime as of ``day``'s close for tagging and blending."""
+        report = await self._regime.analyze(
+            universe,
+            exchange=self._config.exchange,
+            interval=self._config.interval,
+            end=self._eod(day),
+        )
+        label = (
+            report.regime.value
+            if report.available and report.regime is not None
+            else None
+        )
+        return _RegimeAtEntry(report=report, label=label)
+
+    # -- Data helpers ------------------------------------------------------
+
+    async def _day_candle(self, symbol: str, day: date) -> Candle | None:
+        """Return the candle dated exactly ``day`` for ``symbol``, or ``None``."""
+        key = SeriesKey(
+            symbol=symbol,
+            exchange=self._config.exchange,
+            interval=self._config.interval,
+        )
+        start = datetime(day.year, day.month, day.day, tzinfo=INDIA_TZ)
+        candles = await self._data.get_candles(key, start, self._eod(day))
+        for candle in reversed(candles):
+            if candle.timestamp.date() == day:
+                return candle
+        return None
+
+    def _trading_days(self, start: date, end: date) -> list[date]:
+        """Return the trading days in ``[start, end]`` for the exchange."""
+        days: list[date] = []
+        day = start
+        while day <= end:
+            if self._calendar.is_trading_day(day, self._config.exchange):
+                days.append(day)
+            day += timedelta(days=1)
+        return days
+
+    @staticmethod
+    def _eod(day: date) -> datetime:
+        """Return an end-of-day IST timestamp so a day's candle is inclusive."""
+        return datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=INDIA_TZ)
+
+    # -- Reporting ---------------------------------------------------------
+
+    def _build_report(
+        self,
+        universe: tuple[str, ...],
+        start: date,
+        end: date,
+        closed: list[BacktestTrade],
+        realized: float,
+    ) -> BacktestReport:
+        """Assemble the final report from the closed trades and realized P&L."""
+        ordered = sorted(
+            closed, key=lambda t: (t.entry_date, t.exit_date, t.symbol, t.strategy)
+        )
+        starting = self._config.paper.starting_capital
+        total_pnl = round(realized, 2)
+        return BacktestReport(
+            start=start,
+            end=end,
+            symbols=universe,
+            starting_capital=starting,
+            ending_equity=round(starting + total_pnl, 2),
+            total_return_pct=(
+                round(100.0 * total_pnl / starting, 2) if starting else 0.0
+            ),
+            trades=len(ordered),
+            wins=sum(1 for t in ordered if t.net_pnl > 0),
+            losses=sum(1 for t in ordered if t.net_pnl < 0),
+            win_rate=metrics.win_rate(ordered),
+            avg_win=metrics.avg_win(ordered),
+            avg_loss=metrics.avg_loss(ordered),
+            expectancy_r=metrics.expectancy_r(ordered),
+            profit_factor=metrics.profit_factor(ordered),
+            max_drawdown_pct=metrics.max_drawdown_pct(ordered, starting),
+            longest_losing_streak=metrics.longest_losing_streak(ordered),
+            total_pnl=total_pnl,
+            per_strategy=metrics.per_strategy(ordered),
+            per_regime=metrics.per_regime(ordered),
+            monthly=metrics.monthly_returns(ordered, starting),
+            closed_trades=tuple(ordered),
+            generated_at=self._eod(end),
+        )
+
+
+@dataclass(frozen=True)
+class _RegimeAtEntry:
+    """A day's regime report plus its label, used for blending and tagging."""
+
+    report: RegimeReport
+    label: str | None

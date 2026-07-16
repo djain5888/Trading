@@ -11,7 +11,13 @@ import asyncio
 
 import typer
 
-from app.cli.render import render_health, render_paper, render_run, render_version
+from app.cli.render import (
+    render_backtest,
+    render_health,
+    render_paper,
+    render_run,
+    render_version,
+)
 from app.config.settings import DEFAULT_HISTORY_DAYS
 from app.config.watchlist import get_watchlist_config
 from app.core.logging import configure_logging
@@ -244,6 +250,33 @@ def paper(
     configure_logging(services.settings)
     report = asyncio.run(services.paper_engine.report())
     typer.echo(render_paper(report, history=history))
+
+
+@app.command()
+def backtest(
+    from_: str = typer.Option(..., "--from", help="Replay start date (YYYY-MM-DD)."),
+    to: str = typer.Option(..., "--to", help="Replay end date (YYYY-MM-DD)."),
+    symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to include."),
+    exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
+    interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
+) -> None:
+    """Replay strategy setups over history and print an expectancy report."""
+    from datetime import date
+
+    from app.backtest.dependencies import build_backtest_engine
+    from app.backtest.models import BacktestConfig
+
+    services = _resolve_services()
+    configure_logging(services.settings)
+    engine = build_backtest_engine(
+        services, BacktestConfig(exchange=exchange, interval=interval)
+    )
+    report = asyncio.run(
+        engine.run(
+            _watchlist(symbol), date.fromisoformat(from_), date.fromisoformat(to)
+        )
+    )
+    typer.echo(render_backtest(report))
 
 
 @app.command()

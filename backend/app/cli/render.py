@@ -6,6 +6,7 @@ separate from the Typer commands so they are unit-testable.
 
 from __future__ import annotations
 
+from app.backtest.models import BacktestReport
 from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
@@ -219,6 +220,51 @@ def _render_strategies(report: StrategyReport) -> list[str]:
         lines.extend(_render_setups(report, limit=len(report.setups)))
     lines.append(f"Generated:  {report.generated_at.isoformat()}")
     return lines
+
+
+def render_backtest(report: BacktestReport) -> str:
+    """Render the backtest expectancy report to the terminal."""
+    lines = [
+        "===== Titan Backtest =====",
+        f"Window:           {report.start.isoformat()} -> {report.end.isoformat()}",
+        f"Universe:         {len(report.symbols)} symbol(s)",
+        f"Starting Capital: {report.starting_capital:.0f}",
+        f"Ending Equity:    {report.ending_equity:.2f} "
+        f"({report.total_return_pct:+.2f}%)",
+        f"Trades:           {report.trades}  " f"({report.wins}W / {report.losses}L)",
+        f"Win Rate:         {report.win_rate:.1f}%",
+        f"Expectancy:       {report.expectancy_r:+.3f} R/trade  "
+        f"PF={report.profit_factor:.2f}",
+        f"Avg Win/Loss:     {report.avg_win:+.2f} / {report.avg_loss:+.2f}",
+        f"Max Drawdown:     {report.max_drawdown_pct:.2f}%  "
+        f"Longest Losing Streak: {report.longest_losing_streak}",
+        f"Total P&L:        {report.total_pnl:+.2f}",
+    ]
+    if report.per_strategy:
+        lines.append("Per-Strategy:")
+        for stats in report.per_strategy:
+            lines.append(
+                f"  {stats.strategy:<10} trades={stats.trades} "
+                f"win={stats.win_rate:.0f}% exp={stats.expectancy_r:+.2f}R "
+                f"pf={stats.profit_factor:.2f} pnl={stats.total_pnl:+.2f}"
+            )
+    if report.per_regime:
+        lines.append("Per-Regime:")
+        for regime in report.per_regime:
+            lines.append(
+                f"  {regime.regime:<10} trades={regime.trades} "
+                f"win={regime.win_rate:.0f}% exp={regime.expectancy_r:+.2f}R "
+                f"pnl={regime.total_pnl:+.2f}"
+            )
+    if report.monthly:
+        lines.append("Monthly:")
+        for month in report.monthly:
+            lines.append(
+                f"  {month.month} trades={month.trades} "
+                f"pnl={month.net_pnl:+.2f} ({month.return_pct:+.2f}%)"
+            )
+    lines.append(f"Generated:        {report.generated_at.isoformat()}")
+    return "\n".join(lines)
 
 
 def _regime_summary(report: RegimeReport | None) -> str:
