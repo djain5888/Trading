@@ -270,7 +270,13 @@ class HistoricalImportEngine:
                 attempt += 1
             except ProviderError as exc:
                 totals.failed_requests += 1
-                logger.error("Non-retryable provider error for %s: %s", symbol, exc)
+                logger.error(
+                    "Provider error importing %s [%s..%s]: %s",
+                    symbol,
+                    window_start.date(),
+                    window_end.date(),
+                    exc.details or exc,
+                )
                 return None
 
     def _backoff_delay(self, attempt: int, error: ProviderError) -> float:
@@ -315,6 +321,12 @@ class HistoricalImportEngine:
             window_end = min(cursor + span, end)
             windows.append((cursor, window_end))
             cursor = window_end + delta
+        # Fold a lone trailing point (e.g. today's not-yet-formed candle left by
+        # an off-by-one batch split) into its predecessor, so it is not fetched
+        # as a separate, redundant provider call — the second call that failed on
+        # live runs after the first window had already stored the data.
+        if len(windows) >= 2 and windows[-1][0] == windows[-1][1]:
+            windows[-2:] = [(windows[-2][0], windows[-1][1])]
         return windows
 
     async def _is_window_covered(

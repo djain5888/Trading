@@ -103,11 +103,13 @@ class _FakeImportEngine(HistoricalImportEngine):
         data_engine: HistoricalDataEngine,
         fail: bool = False,
         fail_symbols: frozenset[str] = frozenset(),
+        partial_symbols: frozenset[str] = frozenset(),
         auth_fail: bool = False,
     ) -> None:
         self._data_engine = data_engine
         self._fail = fail
         self._fail_symbols = fail_symbols
+        self._partial_symbols = partial_symbols
         self._auth_fail = auth_fail
         self.imported_symbols: list[str] = []
 
@@ -152,13 +154,22 @@ class _FakeImportEngine(HistoricalImportEngine):
             ]
             report = await self._data_engine.import_candles(candles)
             imported += report.imported
-        return ImportSummary(symbols_processed=len(symbols), candles_imported=imported)
+        # A partial symbol stores its candles yet still reports a failed request
+        # (e.g. a trailing window that errored): data landed, so it is not a
+        # failure at the workflow level.
+        failed = 1 if any(s in self._partial_symbols for s in symbols) else 0
+        return ImportSummary(
+            symbols_processed=len(symbols),
+            candles_imported=imported,
+            failed_requests=failed,
+        )
 
 
 def _services(
     *,
     import_fail: bool = False,
     fail_symbols: frozenset[str] = frozenset(),
+    partial_symbols: frozenset[str] = frozenset(),
     auth_fail: bool = False,
 ) -> WorkflowServices:
     """Build a fully-faked service container."""
@@ -204,6 +215,7 @@ def _services(
             data_engine,
             fail=import_fail,
             fail_symbols=fail_symbols,
+            partial_symbols=partial_symbols,
             auth_fail=auth_fail,
         ),
         indicator_engine=indicator_engine,
@@ -274,6 +286,24 @@ async def test_morning_report_surfaces_failed_symbols() -> None:
     assert run.report.imported_symbols == 1
     assert run.report.failed_symbols == 1
     assert run.report.failed_symbol_names == ("BBB",)
+
+
+async def test_morning_counts_symbol_ok_when_data_stored_despite_failure() -> None:
+    """A symbol whose candles stored is OK even if a trailing window failed."""
+    engine = build_workflow_engine(
+        services=_services(partial_symbols=frozenset({"BBB"}))
+    )
+    request = WorkflowRequest(
+        symbols=("AAA", "BBB"), interval=Interval.ONE_MINUTE, history_days=1
+    )
+    run = await engine.run("morning", request)
+
+    assert run.success
+    assert isinstance(run.report, MorningReport)
+    # BBB reported failed_requests>0 but its candles landed -> counted OK.
+    assert run.report.imported_symbols == 2
+    assert run.report.failed_symbols == 0
+    assert run.report.failed_symbol_names == ()
 
 
 async def test_morning_workflow_hard_auth_failure_surfaces() -> None:

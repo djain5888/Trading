@@ -248,7 +248,9 @@ class MorningWorkflow(Workflow):
                 request.exchange,
                 mode=request.import_mode,
             )
-            if summary.failed_requests > 0:
+            # A symbol counts as imported when candles actually landed, even if
+            # a trailing window failed; it is failed only when nothing stored.
+            if summary.candles_imported == 0 and summary.failed_requests > 0:
                 failed.append(symbol)
             else:
                 imported.append(symbol)
@@ -277,7 +279,7 @@ class MorningWorkflow(Workflow):
             regime_config.index_exchange,
             mode=request.import_mode,
         )
-        if summary.failed_requests > 0:
+        if summary.candles_imported == 0 and summary.failed_requests > 0:
             logger.warning(
                 "Benchmark index '%s' import failed; regime/RS will degrade.", index
             )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -38,10 +39,26 @@ from app.providers.exceptions import (
     AuthenticationError,
     InvalidSymbolError,
     NetworkError,
+    ProviderError,
 )
 
 _BASE = datetime(2025, 1, 6, 9, 15, tzinfo=INDIA_TZ)  # Monday, a trading day.
 _KEY = SeriesKey(symbol="RELIANCE", exchange=Exchange.NSE, interval=Interval.ONE_MINUTE)
+_DAILY_KEY = SeriesKey(
+    symbol="RELIANCE", exchange=Exchange.NSE, interval=Interval.ONE_DAY
+)
+
+
+def _daily_bar(day_offset: int) -> Bar:
+    """Build a daily provider bar offset from the base date (a trading day)."""
+    return Bar(
+        timestamp=_BASE + timedelta(days=day_offset),
+        open=Decimal("100"),
+        high=Decimal("105"),
+        low=Decimal("99"),
+        close=Decimal("101"),
+        volume=1000,
+    )
 
 
 def _bar(
@@ -313,6 +330,52 @@ async def test_non_retryable_provider_error() -> None:
     assert summary.failed_requests == 1
     assert summary.retries == 0
     assert summary.candles_imported == 0
+
+
+async def test_daily_import_uses_a_single_provider_call() -> None:
+    """A daily import folds a lone trailing day into one call (double-call fix).
+
+    A history window that leaves a one-point remainder past a full batch used to
+    plan a second, degenerate ``[end, end]`` window whose live SDK call failed
+    even though the first window had already stored the data.
+    """
+    provider = FakeMarketDataProvider({"RELIANCE": [_daily_bar(i) for i in range(5)]})
+    data_engine = HistoricalDataEngine(InMemoryCandleRepository(), ValidationEngine())
+    engine = _make_engine(
+        provider, data_engine=data_engine, config=ImportConfig(batch_size=4)
+    )
+
+    summary = await engine.import_history(
+        ["RELIANCE"], Interval.ONE_DAY, _BASE, _BASE + timedelta(days=4)
+    )
+
+    assert provider.calls == 1  # one window, not a trailing degenerate second
+    assert summary.failed_requests == 0
+    assert summary.candles_imported == 5
+    assert await data_engine.count(_DAILY_KEY) == 5
+
+
+async def test_provider_error_detail_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-retryable provider error logs the real underlying detail (BUG 2)."""
+    provider = FakeMarketDataProvider({"RELIANCE": [_bar(0)]})
+    provider.failures = [
+        ProviderError(
+            "Groww SDK historical candles failed.",
+            details="end_time must be after start_time",
+        )
+    ]
+    engine = _make_engine(provider)
+
+    with caplog.at_level(logging.ERROR):
+        summary = await engine.import_history(
+            ["RELIANCE"], Interval.ONE_MINUTE, _BASE, _BASE
+        )
+
+    assert summary.failed_requests == 1
+    # The real SDK message is surfaced, not just the wrapper "…failed." text.
+    assert "end_time must be after start_time" in caplog.text
 
 
 async def test_authentication_error_propagates() -> None:
