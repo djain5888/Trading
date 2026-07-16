@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import math
 from collections.abc import Sequence
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -485,3 +487,116 @@ async def test_real_strategy_path_runs_without_lookahead() -> None:
     # Determinism across a second, independent run.
     second = await engine.run(["AAA"], date(2025, 1, 2), window_end)
     assert report.model_dump() == second.model_dump()
+
+
+# -- Live-vs-backtest parity and empty-store diagnostics -------------------
+
+
+def _trading_days_seq(
+    cal: MarketCalendarService, start: date, count: int
+) -> list[date]:
+    """Return the first ``count`` NSE trading days on/after ``start``."""
+    days: list[date] = []
+    day = start
+    while len(days) < count:
+        if cal.is_trading_day(day, Exchange.NSE):
+            days.append(day)
+        day += timedelta(days=1)
+    return days
+
+
+def _uptrend(symbol: str, days: Sequence[date]) -> list[Candle]:
+    """A rising series with periodic pullbacks — fires real pullback setups."""
+    base = 1000.0
+    out: list[Candle] = []
+    for i, day in enumerate(days):
+        drift = 1.0 + 0.0015 * i
+        close = base * drift * (1.0 + 0.05 * math.sin(i / 9.0))
+        open_ = base * drift * (1.0 + 0.05 * math.sin((i - 1) / 9.0))
+        high = max(open_, close) * 1.01
+        low = min(open_, close) * 0.985
+        volume = 100_000 + int(30_000 * (1.0 + math.sin(i / 5.0)))
+        out.append(_candle(symbol, day, open_, high, low, close, volume))
+    return out
+
+
+def _clock() -> FakeClock:
+    return FakeClock(datetime(2025, 1, 6, tzinfo=_TZ))
+
+
+async def test_backtest_setups_match_live_strategy_on_same_date() -> None:
+    """The replay's guarded strategy read yields the SAME setups as the live call.
+
+    This is the parity guarantee: on any date, the look-ahead-guarded data view
+    the backtest feeds the StrategyEngine produces exactly what a direct live
+    StrategyEngine call produces on the same stored candles.
+    """
+    data = _data()
+    cal = _calendar()
+    days = _trading_days_seq(cal, date(2025, 1, 1), 200)
+    await _seed(data, _uptrend("AAA", days))
+    indicators = IndicatorEngine(data, _clock(), get_indicator_registry())
+    live = StrategyEngine(data, indicators, _clock())
+
+    def eod(day: date) -> datetime:
+        return datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=_TZ)
+
+    fire = None
+    for day in days[120:190]:
+        if (await live.analyze(["AAA"], end=eod(day))).setups:
+            fire = day
+            break
+    assert fire is not None, "the seeded series should fire at least one setup"
+
+    live_setups = (await live.analyze(["AAA"], end=eod(fire))).setups
+    guard = LookaheadGuard(data)
+    guard.freeze_at(fire)
+    guarded = StrategyEngine(guard, indicators, _clock())
+    backtest_setups = (await guarded.analyze(["AAA"], end=eod(fire))).setups
+
+    assert backtest_setups  # non-empty
+    assert backtest_setups == live_setups  # live vs backtest parity
+
+
+async def test_backtest_opens_trades_on_seeded_history() -> None:
+    """With candles present, the full replay opens a non-zero number of trades."""
+    data = _data()
+    cal = _calendar()
+    days = _trading_days_seq(cal, date(2025, 1, 1), 200)
+    await _seed(data, _uptrend("AAA", days))
+    indicators = IndicatorEngine(data, _clock(), get_indicator_registry())
+    guard = LookaheadGuard(data)
+    engine = BacktestEngine(
+        data=guard,
+        strategy_engine=StrategyEngine(guard, indicators, _clock()),
+        regime_engine=MarketRegimeEngine(guard, indicators, _clock()),
+        calendar=cal,
+        config=BacktestConfig(),
+    )
+
+    report = await engine.run(["AAA"], days[60], days[-1])
+
+    assert report.trades > 0
+
+
+async def test_backtest_warns_loudly_when_store_is_empty(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An empty store yields 0 trades AND a loud, named warning (never silent)."""
+    data = _data()  # nothing seeded
+    cal = _calendar()
+    indicators = IndicatorEngine(data, _clock(), get_indicator_registry())
+    guard = LookaheadGuard(data)
+    engine = BacktestEngine(
+        data=guard,
+        strategy_engine=StrategyEngine(guard, indicators, _clock()),
+        regime_engine=MarketRegimeEngine(guard, indicators, _clock()),
+        calendar=cal,
+        config=BacktestConfig(),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        report = await engine.run(["AAA"], date(2025, 1, 6), date(2025, 1, 17))
+
+    assert report.trades == 0
+    assert "NO stored candles" in caplog.text

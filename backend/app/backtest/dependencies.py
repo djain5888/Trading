@@ -8,12 +8,18 @@ data engine. Only the data view changes — the decision logic is identical to l
 
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
+
 from app.backtest.engine import BacktestEngine
 from app.backtest.guard import LookaheadGuard
 from app.backtest.models import BacktestConfig
+from app.core.timezone import INDIA_TZ
 from app.market.regime.engine import MarketRegimeEngine
 from app.strategy.engine import StrategyEngine
 from app.workflow.services import WorkflowServices
+
+#: Extra calendar days pulled in before ``start`` so day one has full lookback.
+_LOOKBACK_BUFFER_DAYS = 30
 
 
 def build_backtest_engine(
@@ -49,3 +55,39 @@ def build_backtest_engine(
         calendar=services.calendar,
         config=config or BacktestConfig(),
     )
+
+
+async def load_backtest_history(
+    services: WorkflowServices,
+    symbols: list[str],
+    start: date,
+    end: date,
+    config: BacktestConfig,
+) -> None:
+    """Load the candles the replay needs into the shared store.
+
+    The candle store is process-scoped, so — exactly as the morning workflow
+    imports before it analyses — the backtest must load history before replaying,
+    or the guarded view is empty and no setup can fire. Enough history is pulled
+    before ``start`` to satisfy the strategy's full lookback on day one, and the
+    benchmark index is loaded too so the regime can classify.
+    """
+    lookback = services.strategy_engine.config.history_days + _LOOKBACK_BUFFER_DAYS
+    load_start = datetime(
+        start.year, start.month, start.day, tzinfo=INDIA_TZ
+    ) - timedelta(days=lookback)
+    load_end = datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=INDIA_TZ)
+    engine = services.import_engine
+    await engine.import_history(
+        list(symbols), config.interval, load_start, load_end, config.exchange
+    )
+    regime_config = services.regime_engine.config
+    index = regime_config.index_symbol
+    if index and index.upper() not in {symbol.strip().upper() for symbol in symbols}:
+        await engine.import_history(
+            [index],
+            config.interval,
+            load_start,
+            load_end,
+            regime_config.index_exchange,
+        )

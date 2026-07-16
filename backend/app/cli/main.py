@@ -20,7 +20,7 @@ from app.cli.render import (
 )
 from app.config.settings import DEFAULT_HISTORY_DAYS
 from app.config.watchlist import get_watchlist_config
-from app.core.logging import configure_logging
+from app.core.logging import configure_logging, get_logger
 from app.market.enums import Exchange, Interval
 from app.workflow.diagnostics import (
     is_healthy,
@@ -32,6 +32,7 @@ from app.workflow.models import WorkflowRequest, WorkflowRun
 from app.workflow.services import WorkflowServices
 
 app = typer.Typer(help="Titan — AI quant trading platform CLI.", no_args_is_help=True)
+logger = get_logger(__name__)
 
 
 def _resolve_services() -> WorkflowServices:
@@ -263,20 +264,25 @@ def backtest(
     """Replay strategy setups over history and print an expectancy report."""
     from datetime import date
 
-    from app.backtest.dependencies import build_backtest_engine
-    from app.backtest.models import BacktestConfig
+    from app.backtest.dependencies import build_backtest_engine, load_backtest_history
+    from app.backtest.models import BacktestConfig, BacktestReport
 
     services = _resolve_services()
     configure_logging(services.settings)
-    engine = build_backtest_engine(
-        services, BacktestConfig(exchange=exchange, interval=interval)
-    )
-    report = asyncio.run(
-        engine.run(
-            _watchlist(symbol), date.fromisoformat(from_), date.fromisoformat(to)
-        )
-    )
-    typer.echo(render_backtest(report))
+    universe = list(_watchlist(symbol))
+    config = BacktestConfig(exchange=exchange, interval=interval)
+    start, end = date.fromisoformat(from_), date.fromisoformat(to)
+
+    async def _run() -> BacktestReport:
+        try:
+            # Load candles first (like the morning workflow) so the replay sees
+            # the same data; the store is per-process and starts empty.
+            await load_backtest_history(services, universe, start, end, config)
+        except Exception as exc:  # noqa: BLE001 - best-effort; the engine warns loudly
+            logger.warning("Backtest history load failed: %s", exc)
+        return await build_backtest_engine(services, config).run(universe, start, end)
+
+    typer.echo(render_backtest(asyncio.run(_run())))
 
 
 @app.command()
