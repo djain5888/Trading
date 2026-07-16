@@ -55,6 +55,15 @@ def test_get_watchlist_config_is_populated() -> None:
     assert config.sectors
 
 
+def test_default_history_days_covers_long_lookbacks() -> None:
+    """The default import window spans 300+ trading sessions, and is configurable."""
+    from app.config.settings import DEFAULT_HISTORY_DAYS, Settings
+
+    assert DEFAULT_HISTORY_DAYS >= 420  # ~300 trading days in calendar terms
+    assert Settings().history_days == DEFAULT_HISTORY_DAYS
+    assert Settings(history_days=123).history_days == 123  # configurable
+
+
 def test_watchlist_file_override(tmp_path: Path) -> None:
     """A JSON file overrides the defaults and is normalised."""
     path = tmp_path / "watchlist.json"

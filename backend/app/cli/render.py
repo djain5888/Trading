@@ -119,8 +119,7 @@ def _render_morning(report: MorningReport) -> list[str]:
             lines.append(f"  {name}: {count}")
     lines.append(f"Top {len(report.top_results)} Ranked Stocks:")
     lines.extend(_render_results(report.top_results, report.relative))
-    lines.append("Strategy Setups:")
-    lines.extend(_render_setups(report.strategies))
+    lines.extend(_strategy_section(report.strategies))
     lines.append(f"Paper Book:          {_paper_summary(report.paper)}")
     lines.append(f"Generated At:        {report.generated_at.isoformat()}")
     return lines
@@ -189,12 +188,19 @@ def _render_closed(trades: tuple[PaperTrade, ...]) -> list[str]:
     ]
 
 
+def _strategy_section(report: StrategyReport | None) -> list[str]:
+    """Render the morning strategy block, always visible ("none" when empty)."""
+    setups = report.setups if report is not None and report.available else ()
+    if not setups:
+        detail = f" ({report.detail})" if report is not None else ""
+        return [f"Strategy Setups:     none{detail}"]
+    return ["Strategy Setups:", *_render_setups(report)]
+
+
 def _render_setups(report: StrategyReport | None, limit: int = 10) -> list[str]:
     """Render the top named strategy setups (symbol, strategy, confidence, RR)."""
-    if report is None or not report.available:
-        return ["  (strategies unavailable)"]
-    if not report.setups:
-        return ["  (no setups)"]
+    if report is None or not report.available or not report.setups:
+        return ["  none"]
     return [
         f"  {index:>2}. {setup.symbol:<12} {setup.strategy:<9} "
         f"conf={setup.confidence:5.1f} RR={setup.reward_risk:.1f} "

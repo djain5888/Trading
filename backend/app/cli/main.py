@@ -12,6 +12,7 @@ import asyncio
 import typer
 
 from app.cli.render import render_health, render_paper, render_run, render_version
+from app.config.settings import DEFAULT_HISTORY_DAYS
 from app.config.watchlist import get_watchlist_config
 from app.core.logging import configure_logging
 from app.market.enums import Exchange, Interval
@@ -72,7 +73,9 @@ def morning(
     symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to include."),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
     interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
-    history_days: int = typer.Option(60, help="Days of history to consider."),
+    history_days: int = typer.Option(
+        DEFAULT_HISTORY_DAYS, help="Days of history to consider."
+    ),
 ) -> None:
     """Run the full pre-market pipeline and print the morning report."""
     request = WorkflowRequest(
@@ -89,7 +92,9 @@ def import_(
     symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to import."),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
     interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
-    history_days: int = typer.Option(60, help="Days of history to import."),
+    history_days: int = typer.Option(
+        DEFAULT_HISTORY_DAYS, help="Days of history to import."
+    ),
 ) -> None:
     """Update historical candles for the given symbols."""
     request = WorkflowRequest(
@@ -106,7 +111,9 @@ def indicators(
     symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to compute."),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
     interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
-    history_days: int = typer.Option(60, help="Days of history to use."),
+    history_days: int = typer.Option(
+        DEFAULT_HISTORY_DAYS, help="Days of history to use."
+    ),
 ) -> None:
     """Refresh indicators for the given symbols."""
     request = WorkflowRequest(
@@ -124,7 +131,9 @@ def scan(
     scanner: list[str] = typer.Option([], "--scanner", help="Scanner to run."),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
     interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
-    history_days: int = typer.Option(60, help="Days of history to use."),
+    history_days: int = typer.Option(
+        DEFAULT_HISTORY_DAYS, help="Days of history to use."
+    ),
     top: int = typer.Option(20, help="Number of ranked results to show."),
 ) -> None:
     """Run scanners and print ranked candidates."""

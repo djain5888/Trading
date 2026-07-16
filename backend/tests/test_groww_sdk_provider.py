@@ -113,15 +113,38 @@ async def test_historical_daily_candles_are_mapped() -> None:
     assert client.historical_calls[0]["segment"] == "CASH"  # from SEGMENT_CASH
 
 
-async def test_malformed_candle_row_raises_provider_error() -> None:
-    """A short/garbled candle row surfaces as a ProviderError."""
-    client = FakeGrowwClient(candles={"RELIANCE": [[1_700_000_000, 100.0]]})
+async def test_index_candles_tolerate_zero_and_missing_volume() -> None:
+    """Index rows with zero or absent volume parse cleanly (BUG 1)."""
+    rows = [
+        [1_700_000_000, 100.0, 101.0, 99.0, 100.5, 0],  # explicit zero volume
+        [1_700_086_400, 100.5, 102.0, 100.0, 101.5],  # no volume column at all
+    ]
+    client = FakeGrowwClient(candles={"NIFTY": rows})
     provider = _provider(client)
 
-    with pytest.raises(ProviderError):
-        await provider.get_historical_data(
-            "RELIANCE", Interval.ONE_DAY, datetime(2025, 1, 1, tzinfo=INDIA_TZ), _NOW
-        )
+    data = await provider.get_historical_data(
+        "NIFTY", Interval.ONE_DAY, datetime(2025, 1, 1, tzinfo=INDIA_TZ), _NOW
+    )
+
+    assert len(data.candles) == 2
+    assert all(candle.volume == 0 for candle in data.candles)
+    assert data.candles[1].close == Decimal("101.5")
+
+
+async def test_malformed_row_is_skipped_not_failed() -> None:
+    """A genuinely malformed row is skipped; the series is not failed (BUG 1)."""
+    rows = [
+        [1_700_000_000, 100.0, 101.0, 99.0, 100.5, 1000],  # valid
+        [1_700_086_400, 100.5],  # too short -> skipped
+    ]
+    client = FakeGrowwClient(candles={"NIFTY": rows})
+    provider = _provider(client)
+
+    data = await provider.get_historical_data(
+        "NIFTY", Interval.ONE_DAY, datetime(2025, 1, 1, tzinfo=INDIA_TZ), _NOW
+    )
+
+    assert len(data.candles) == 1  # bad row dropped, no ProviderError raised
 
 
 # -- Latest price (LTP) ----------------------------------------------------

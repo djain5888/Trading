@@ -242,35 +242,72 @@ def _exchange_token(client: GrowwSDKClient, exchange: Exchange) -> str:
 
 
 def _parse_candles(payload: Mapping[str, Any]) -> tuple[Candle, ...]:
-    """Map a SDK historical payload into canonical candles."""
+    """Map a SDK historical payload into canonical candles.
+
+    Index series (e.g. NIFTY) differ from equities — they may carry no/zero
+    volume and a shorter row. Rows are mapped defensively: a genuinely malformed
+    row is skipped (never fails the whole series), volume defaults to zero.
+    """
     rows = payload.get("candles")
     if not isinstance(rows, Sequence) or isinstance(rows, str | bytes):
         raise ProviderError("Groww SDK historical payload had no 'candles' list.")
+    candles: list[Candle] = []
+    skipped = 0
+    for row in rows:
+        candle = _candle(row)
+        if candle is None:
+            skipped += 1
+        else:
+            candles.append(candle)
+    if skipped:
+        logger.debug("Skipped %d malformed Groww SDK candle row(s).", skipped)
+    return tuple(candles)
+
+
+def _candle(row: Any) -> Candle | None:
+    """Map one SDK candle row into a Candle, or ``None`` if it is malformed.
+
+    Accepts ``[epoch, o, h, l, c]`` or ``[epoch, o, h, l, c, v]`` (or a mapping).
+    Volume is optional and defaults to zero for index rows.
+    """
     try:
-        return tuple(_candle(row) for row in rows)
-    except (KeyError, IndexError, TypeError, ValueError) as exc:
-        raise ProviderError(
-            "Malformed Groww SDK candle row.", details=str(exc)
-        ) from exc
+        if isinstance(row, Mapping):
+            timestamp = row.get("timestamp", row.get("time"))
+            open_, high, low, close = (
+                row["open"],
+                row["high"],
+                row["low"],
+                row["close"],
+            )
+            volume = row.get("volume", 0)
+        else:
+            if len(row) < 5:
+                return None
+            timestamp = row[0]
+            open_, high, low, close = row[1], row[2], row[3], row[4]
+            volume = row[5] if len(row) > 5 else 0
+        if timestamp is None:
+            return None
+        return Candle(
+            timestamp=_to_datetime(timestamp),
+            open=_dec(open_),
+            high=_dec(high),
+            low=_dec(low),
+            close=_dec(close),
+            volume=_volume(volume),
+        )
+    except (KeyError, IndexError, TypeError, ValueError):
+        return None
 
 
-def _candle(row: Any) -> Candle:
-    """Map one SDK candle row ``[epoch, o, h, l, c, v]`` (or a mapping)."""
-    if isinstance(row, Mapping):
-        timestamp = row.get("timestamp", row.get("time"))
-        values = (row["open"], row["high"], row["low"], row["close"], row["volume"])
-    else:
-        timestamp = row[0]
-        values = (row[1], row[2], row[3], row[4], row[5])
-    open_, high, low, close, volume = values
-    return Candle(
-        timestamp=_to_datetime(timestamp),
-        open=_dec(open_),
-        high=_dec(high),
-        low=_dec(low),
-        close=_dec(close),
-        volume=int(volume),
-    )
+def _volume(value: Any) -> int:
+    """Parse a tolerant, non-negative integer volume (defaults to 0)."""
+    if value is None:
+        return 0
+    try:
+        return max(0, int(float(value)))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _ltp_value(payload: Mapping[str, Any], key: str) -> Decimal:

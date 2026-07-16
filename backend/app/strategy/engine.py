@@ -152,6 +152,14 @@ class StrategyEngine:
                 generated_at=now,
                 detail="No symbol had enough history — strategies unavailable.",
             )
+        if not setups:
+            # Surface the gap rather than loosening thresholds blindly: symbols
+            # had enough data but no setup fired, so the triggers may need tuning.
+            logger.info(
+                "Strategy engine evaluated %d symbol(s) but no setup fired; "
+                "review indicator ranges vs thresholds before tuning.",
+                evaluated,
+            )
         return StrategyReport(
             available=True,
             setups=tuple(setups),

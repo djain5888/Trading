@@ -239,6 +239,9 @@ async def test_morning_workflow_success() -> None:
     assert run.report.market_open is True
     assert run.report.imported_symbols == 2
     assert run.report.failed_symbols == 0
+    # BUG 3: the strategy step's output reaches the morning report.
+    assert run.report.strategies is not None
+    assert run.report.paper is not None
 
 
 async def test_morning_imports_index_benchmark() -> None:
@@ -311,6 +314,34 @@ def test_render_morning_shows_import_counts() -> None:
     )
     text = render_run(run)
     assert "Import:              1 ok / 1 failed (BBB)" in text
+
+
+def test_render_morning_shows_strategy_none_when_empty() -> None:
+    """The morning render always shows a visible strategy section (BUG 3)."""
+    from app.cli.render import render_run
+    from app.strategy.models import StrategyReport
+    from app.workflow.models import StepResult, WorkflowRun
+
+    report = MorningReport(
+        market_open=True,
+        market_state="open",
+        stocks_scanned=2,
+        indicators_refreshed=3,
+        strategies=StrategyReport.unavailable(
+            generated_at=_OPEN, detail="0 setups across 5 evaluated symbol(s)."
+        ),
+        generated_at=_OPEN,
+    )
+    run = WorkflowRun(
+        workflow="morning",
+        success=True,
+        elapsed_seconds=0.1,
+        steps=(StepResult(name="x", ok=True, duration_seconds=0.0),),
+        error=None,
+        report=report,
+    )
+    text = render_run(run)
+    assert "Strategy Setups:     none" in text
 
 
 async def test_morning_workflow_step_failure() -> None:

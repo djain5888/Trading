@@ -26,6 +26,10 @@ __all__ = ["Environment", "Settings", "get_settings"]
 #: Selectable market-data provider backends.
 MarketDataBackend = Literal["groww", "groww_sdk", "fake"]
 
+#: Default historical import window in calendar days. ~500 calendar days is
+#: ~330+ trading sessions — enough for the 200-EMA regime and RS lookbacks.
+DEFAULT_HISTORY_DAYS = 500
+
 
 class Settings(BaseSettings):
     """Root application settings.
@@ -69,6 +73,11 @@ class Settings(BaseSettings):
     watchlist_file: str | None = Field(
         default=None,
         description="Optional JSON file overriding the default watchlist/sectors.",
+    )
+    history_days: int = Field(
+        default=DEFAULT_HISTORY_DAYS,
+        ge=1,
+        description="Default historical import lookback in calendar days.",
     )
 
     # --- Infrastructure groups ---
