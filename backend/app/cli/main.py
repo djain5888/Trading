@@ -286,6 +286,71 @@ def backtest(
 
 
 @app.command()
+def baseline(
+    from_: str = typer.Option(..., "--from", help="Replay start date (YYYY-MM-DD)."),
+    to: str = typer.Option(..., "--to", help="Replay end date (YYYY-MM-DD)."),
+    strategy: str = typer.Option(
+        "", "--strategy", help="Baseline name (omit with --all)."
+    ),
+    all_baselines: bool = typer.Option(
+        False, "--all", help="Run every baseline and print a comparison table."
+    ),
+    symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to include."),
+    exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
+    interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
+) -> None:
+    """Search well-known baselines for any positive-expectancy edge."""
+    from datetime import date
+
+    from app.backtest.baselines.dependencies import build_baseline_engine
+    from app.backtest.baselines.models import BaselineName, BaselineResult
+    from app.backtest.dependencies import load_backtest_history
+    from app.backtest.models import BacktestConfig, BacktestReport
+    from app.cli.render import render_baseline_comparison
+
+    services = _resolve_services()
+    configure_logging(services.settings)
+    universe = list(_watchlist(symbol))
+    config = BacktestConfig(exchange=exchange, interval=interval)
+    start, end = date.fromisoformat(from_), date.fromisoformat(to)
+
+    if not all_baselines and not strategy:
+        raise typer.BadParameter("Provide --strategy <name> or --all.")
+    try:
+        names = (
+            list(BaselineName)
+            if all_baselines
+            else [BaselineName(strategy.strip().lower())]
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(f"Unknown baseline '{strategy}'.") from exc
+
+    async def _run() -> list[tuple[BaselineName, BacktestReport]]:
+        try:
+            await load_backtest_history(services, universe, start, end, config)
+        except Exception as exc:  # noqa: BLE001 - best-effort; each run warns loudly
+            logger.warning("Baseline history load failed: %s", exc)
+        reports: list[tuple[BaselineName, BacktestReport]] = []
+        for name in names:
+            report = await build_baseline_engine(services, name, config=config).run(
+                universe, start, end
+            )
+            reports.append((name, report))
+        return reports
+
+    try:
+        reports = asyncio.run(_run())
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+
+    if all_baselines:
+        results = [BaselineResult.from_report(n.value, r) for n, r in reports]
+        typer.echo(render_baseline_comparison(results))
+    else:
+        typer.echo(render_backtest(reports[0][1]))
+
+
+@app.command()
 def serve() -> None:
     """Start the FastAPI server (Uvicorn)."""
     from app.main import run as run_server

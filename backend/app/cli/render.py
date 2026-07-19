@@ -6,6 +6,9 @@ separate from the Typer commands so they are unit-testable.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+from app.backtest.baselines.models import BaselineResult
 from app.backtest.models import (
     BacktestReport,
     ExecutionLeakage,
@@ -272,6 +275,28 @@ def render_backtest(report: BacktestReport) -> str:
     if report.trades:
         lines.extend(_render_execution_leakage(report.execution_leakage))
     lines.append(f"Generated:        {report.generated_at.isoformat()}")
+    return "\n".join(lines)
+
+
+def render_baseline_comparison(results: Sequence[BaselineResult]) -> str:
+    """Render a side-by-side comparison table of baseline runs."""
+    header = (
+        f"{'baseline':<16} {'trades':>6} {'exp_R':>7} {'PF':>6} "
+        f"{'win%':>6} {'maxDD%':>7} {'return%':>8} {'perfect_R':>9}"
+    )
+    lines = ["===== Titan Baseline Search =====", header, "-" * len(header)]
+    for row in results:
+        lines.append(
+            f"{row.name:<16} {row.trades:>6} {row.expectancy_r:>+7.3f} "
+            f"{row.profit_factor:>6.2f} {row.win_rate:>6.1f} "
+            f"{row.max_drawdown_pct:>7.2f} {row.total_return_pct:>+8.2f} "
+            f"{row.perfect_expectancy_r:>+9.3f}"
+        )
+    positive = [row.name for row in results if row.expectancy_r > 0]
+    lines.append("")
+    lines.append(
+        "Positive net expectancy: " + (", ".join(positive) if positive else "none")
+    )
     return "\n".join(lines)
 
 

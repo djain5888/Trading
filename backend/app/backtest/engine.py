@@ -20,7 +20,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 
-from app.backtest import metrics
+from app.backtest import execution
 from app.backtest.guard import LookaheadGuard
 from app.backtest.models import (
     BacktestConfig,
@@ -29,7 +29,6 @@ from app.backtest.models import (
     ExitKind,
 )
 from app.core.logging import get_logger
-from app.core.timezone import INDIA_TZ
 from app.market.calendar.service import MarketCalendarService
 from app.market.historical.models import Candle, SeriesKey
 from app.market.regime.engine import MarketRegimeEngine
@@ -39,9 +38,6 @@ from app.strategy.engine import StrategyEngine
 from app.strategy.models import StrategySetup
 
 logger = get_logger(__name__)
-
-#: A tz-aware lower bound used to probe whether any candle is stored at all.
-_EPOCH = datetime(1970, 1, 1, tzinfo=INDIA_TZ)
 
 
 @dataclass
@@ -334,56 +330,24 @@ class BacktestEngine:
         kind: ExitKind,
     ) -> BacktestTrade:
         """Build the closed-trade record, net of slippage and charges."""
-        exit_fill = self._exit_fill(level)
-        gross = (exit_fill - position.entry_price) * position.size
-        charges = self._charges(
-            position.entry_price * position.size, exit_fill * position.size
-        )
-        net = gross - charges
-        risk_amount = (position.entry_price - position.stop) * position.size
-        r_multiple = net / risk_amount if risk_amount > 0 else 0.0
-        return BacktestTrade(
-            symbol=position.symbol,
-            strategy=position.strategy,
-            regime=position.regime,
-            entry_date=position.entry_date,
+        return execution.build_trade(
+            position,
             exit_date=day,
-            signal_price=round(position.signal_price, 4),
-            entry_open=round(position.entry_open, 4),
-            entry_price=round(position.entry_price, 4),
-            exit_level=round(level, 4),
-            exit_price=round(exit_fill, 4),
-            stop_price=round(position.stop, 4),
-            target_price=round(position.target, 4),
-            size=position.size,
-            exit_reason=reason,
-            exit_kind=kind,
-            gross_pnl=round(gross, 2),
-            costs=round(charges, 2),
-            net_pnl=round(net, 2),
-            r_multiple=round(r_multiple, 3),
+            level=level,
+            reason=reason,
+            kind=kind,
+            costs=self._config.costs,
         )
 
     # -- Cost model --------------------------------------------------------
 
     def _entry_fill(self, raw_open: float) -> float:
         """Apply entry slippage (a buy fills higher)."""
-        return raw_open * (1.0 + self._config.costs.slippage_pct / 100.0)
-
-    def _exit_fill(self, level: float) -> float:
-        """Apply exit slippage (a sell fills lower)."""
-        return level * (1.0 - self._config.costs.slippage_pct / 100.0)
-
-    def _charges(self, entry_notional: float, exit_notional: float) -> float:
-        """Return brokerage/STT charges levied on both sides' notional."""
-        return (entry_notional + exit_notional) * self._config.costs.charge_pct / 100.0
+        return execution.entry_fill(raw_open, self._config.costs)
 
     def _size(self, equity: float, entry: float, stop: float) -> float:
         """Return the size risking ``risk_pct`` of equity to the stop (paper rule)."""
-        risk_per_share = entry - stop
-        if risk_per_share <= 0:
-            return 0.0
-        return round(equity * (self._config.paper.risk_pct / 100.0) / risk_per_share, 4)
+        return execution.position_size(equity, entry, stop, self._config.paper.risk_pct)
 
     # -- Regime tagging ----------------------------------------------------
 
@@ -408,32 +372,18 @@ class BacktestEngine:
 
     async def _day_candle(self, symbol: str, day: date) -> Candle | None:
         """Return the candle dated exactly ``day`` for ``symbol``, or ``None``."""
-        key = SeriesKey(
-            symbol=symbol,
-            exchange=self._config.exchange,
-            interval=self._config.interval,
+        return await execution.day_candle(
+            self._data, symbol, self._config.exchange, self._config.interval, day
         )
-        start = datetime(day.year, day.month, day.day, tzinfo=INDIA_TZ)
-        candles = await self._data.get_candles(key, start, self._eod(day))
-        for candle in reversed(candles):
-            if candle.timestamp.date() == day:
-                return candle
-        return None
 
     def _trading_days(self, start: date, end: date) -> list[date]:
         """Return the trading days in ``[start, end]`` for the exchange."""
-        days: list[date] = []
-        day = start
-        while day <= end:
-            if self._calendar.is_trading_day(day, self._config.exchange):
-                days.append(day)
-            day += timedelta(days=1)
-        return days
+        return execution.trading_days(self._calendar, self._config.exchange, start, end)
 
     @staticmethod
     def _eod(day: date) -> datetime:
         """Return an end-of-day IST timestamp so a day's candle is inclusive."""
-        return datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=INDIA_TZ)
+        return execution.eod(day)
 
     async def _any_stored(self, universe: Sequence[str], end: date) -> bool:
         """Return whether the store holds any candle for the universe up to ``end``.
@@ -441,16 +391,9 @@ class BacktestEngine:
         This distinguishes the "no candles were ever loaded" failure (the store
         is empty for this process) from "candles exist but history is too short".
         """
-        end_dt = self._eod(end)
-        for symbol in universe:
-            key = SeriesKey(
-                symbol=symbol,
-                exchange=self._config.exchange,
-                interval=self._config.interval,
-            )
-            if await self._data.get_candles(key, _EPOCH, end_dt):
-                return True
-        return False
+        return await execution.any_stored(
+            self._data, universe, self._config.exchange, self._config.interval, end
+        )
 
     async def _ready_count(self, universe: Sequence[str], day: date) -> int:
         """Count symbols with enough history for the strategy as of ``day``.
@@ -525,38 +468,13 @@ class BacktestEngine:
         realized: float,
     ) -> BacktestReport:
         """Assemble the final report from the closed trades and realized P&L."""
-        ordered = sorted(
-            closed, key=lambda t: (t.entry_date, t.exit_date, t.symbol, t.strategy)
-        )
-        starting = self._config.paper.starting_capital
-        total_pnl = round(realized, 2)
-        return BacktestReport(
+        return execution.build_report(
+            universe=universe,
             start=start,
             end=end,
-            symbols=universe,
-            starting_capital=starting,
-            ending_equity=round(starting + total_pnl, 2),
-            total_return_pct=(
-                round(100.0 * total_pnl / starting, 2) if starting else 0.0
-            ),
-            trades=len(ordered),
-            wins=sum(1 for t in ordered if t.net_pnl > 0),
-            losses=sum(1 for t in ordered if t.net_pnl < 0),
-            win_rate=metrics.win_rate(ordered),
-            avg_win=metrics.avg_win(ordered),
-            avg_loss=metrics.avg_loss(ordered),
-            expectancy_r=metrics.expectancy_r(ordered),
-            profit_factor=metrics.profit_factor(ordered),
-            max_drawdown_pct=metrics.max_drawdown_pct(ordered, starting),
-            longest_losing_streak=metrics.longest_losing_streak(ordered),
-            total_pnl=total_pnl,
-            per_strategy=metrics.per_strategy(ordered),
-            per_regime=metrics.per_regime(ordered),
-            monthly=metrics.monthly_returns(ordered, starting),
-            closed_trades=tuple(ordered),
-            exit_analysis=metrics.exit_analysis(ordered),
-            execution_leakage=metrics.execution_leakage(ordered),
-            generated_at=self._eod(end),
+            closed=closed,
+            realized=realized,
+            config=self._config,
         )
 
 
