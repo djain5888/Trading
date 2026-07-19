@@ -7,11 +7,19 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from app.backtest.baselines.base import BaselineContext
+from app.backtest.baselines.base import BaselineContext, atr_expanding, is_new_high
 from app.backtest.baselines.dependencies import create_baseline
 from app.backtest.baselines.engine import BaselineEngine
 from app.backtest.baselines.models import BaselineConfig, BaselineName
-from app.backtest.baselines.strategies import MeanRevert, Momentum121, TopRSWeekly
+from app.backtest.baselines.strategies import (
+    DualMomentum,
+    MeanRevert,
+    Momentum121,
+    RSMomentumCash,
+    TopRSWeekly,
+    TrendFollow,
+    VolatilityBreak,
+)
 from app.backtest.guard import LookaheadGuard
 from app.backtest.models import BacktestConfig, BacktestReport
 from app.core.clock import FakeClock
@@ -299,3 +307,127 @@ async def test_baseline_rejects_inverted_range() -> None:
             date(2025, 2, 1),
             date(2025, 1, 1),
         )
+
+
+# -- TASK-024 candidates: entry/exit logic ---------------------------------
+
+
+def _bar(on: date, close: float) -> Candle:
+    """A coherent daily candle (open=close, +/-1% high/low) for helper tests."""
+    return Candle(
+        symbol="X",
+        exchange=Exchange.NSE,
+        interval=Interval.ONE_DAY,
+        timestamp=datetime(on.year, on.month, on.day, 9, 15, tzinfo=_TZ),
+        open=Decimal(f"{close:.2f}"),
+        high=Decimal(f"{close * 1.01:.2f}"),
+        low=Decimal(f"{close * 0.99:.2f}"),
+        close=Decimal(f"{close:.2f}"),
+        volume=100_000,
+    )
+
+
+def test_new_high_and_atr_expanding_helpers() -> None:
+    """The breakout and volatility-expansion helpers are correct."""
+    days = _trading_days(_calendar(), date(2024, 1, 1), 10)
+    closes = [100.0] * 9 + [125.0]  # a flat base then a breakout on the last bar
+    candles = [_bar(day, close) for day, close in zip(days, closes, strict=True)]
+
+    assert is_new_high(candles, 5) is True  # 125 clears the prior 5-bar high
+    assert is_new_high(candles[:-1], 5) is False  # a flat bar makes no new high
+    assert atr_expanding([1.0, 1.0, 1.0, 3.0], 2) is True  # 3.0 > 1.0
+    assert atr_expanding([3.0, 2.0, 1.0], 2) is False
+
+
+async def test_trend_follow_enters_above_ema_and_exits_below() -> None:
+    """Trend-follow buys above the trend EMA and sells when price drops below it."""
+    cal = _calendar()
+    days = _trading_days(cal, date(2024, 1, 1), 45)
+    data = _data()
+    await _seed(data, "CCC", days, [100.0 + j * 2.0 for j in range(45)])  # rising
+
+    plan = await TrendFollow(_TUNING).plan(
+        _ctx(data, days[44]), days[44], ["CCC"], frozenset()
+    )
+    assert [e.symbol for e in plan.entries] == ["CCC"]  # above EMA -> enter
+
+    # Now a series that has fallen well below its EMA at the end.
+    data2 = _data()
+    prices = [100.0 + j * 2.0 for j in range(35)] + [
+        168.0 - k * 10.0 for k in range(1, 11)
+    ]
+    await _seed(data2, "CCC", days, prices)
+    plan2 = await TrendFollow(_TUNING).plan(
+        _ctx(data2, days[44]), days[44], ["CCC"], frozenset({"CCC"})
+    )
+    assert "CCC" in plan2.exits  # dropped below EMA -> exit
+
+
+async def test_dual_momentum_is_gated_by_the_index() -> None:
+    """Dual momentum buys the top-RS name only when the index is above its EMA."""
+    cal = _calendar()
+    days = _trading_days(cal, date(2024, 1, 1), 45)
+    # Bullish index -> entries fire.
+    data = _data()
+    await _seed(data, "CCC", days, [100.0 + j * 2.0 for j in range(45)])
+    await _seed(data, "NIFTY", days, [100.0 + j * 1.0 for j in range(45)])  # above EMA
+    plan = await DualMomentum(_TUNING).plan(
+        _ctx(data, days[44]), days[44], ["CCC"], frozenset()
+    )
+    assert [e.symbol for e in plan.entries] == ["CCC"]
+
+    # Bearish index (below its EMA) -> gate closed, no entries.
+    data2 = _data()
+    await _seed(data2, "CCC", days, [100.0 + j * 2.0 for j in range(45)])
+    bear = [100.0 + j * 1.0 for j in range(30)] + [
+        130.0 - k * 6.0 for k in range(1, 16)
+    ]
+    await _seed(data2, "NIFTY", days, bear)
+    plan2 = await DualMomentum(_TUNING).plan(
+        _ctx(data2, days[44]), days[44], ["CCC"], frozenset()
+    )
+    assert plan2.entries == ()
+
+
+async def test_rs_momentum_cash_exits_to_cash_in_a_bear_index() -> None:
+    """The cash overlay closes every position when the index turns bearish."""
+    cal = _calendar()
+    days = _trading_days(cal, date(2024, 1, 1), 45)
+    data = _data()
+    await _seed(data, "CCC", days, [100.0 + j * 2.0 for j in range(45)])
+    bear = [100.0 + j * 1.0 for j in range(30)] + [
+        130.0 - k * 6.0 for k in range(1, 16)
+    ]
+    await _seed(data, "NIFTY", days, bear)
+
+    plan = await RSMomentumCash(_TUNING).plan(
+        _ctx(data, days[44]), days[44], ["CCC"], frozenset({"CCC"})
+    )
+
+    assert plan.exits == frozenset({"CCC"})  # risk-off: hold cash
+    assert plan.entries == ()
+
+
+async def test_volatility_break_enters_on_expanding_breakout() -> None:
+    """A new high confirmed by ATR expansion opens a trailing-stop position."""
+    cal = _calendar()
+    days = _trading_days(cal, date(2024, 1, 1), 30)
+    data = _data()
+    # Flat, low-volatility base, then an accelerating breakout on the last bars.
+    prices = [100.0] * 24 + [102.0, 105.0, 109.0, 114.0, 120.0, 127.0]
+    await _seed(data, "CCC", days, prices)
+
+    tuning = BaselineConfig(
+        top_n=1,
+        history_days=200,
+        atr_period=5,
+        vol_breakout_lookback=5,
+        vol_expansion_lookback=3,
+    )
+    plan = await VolatilityBreak(tuning).plan(
+        _ctx(data, days[29]), days[29], ["CCC"], frozenset()
+    )
+
+    assert [e.symbol for e in plan.entries] == ["CCC"]
+    assert plan.entries[0].uses_stop is True  # ridden by a trailing stop
+    assert plan.entries[0].trailing_distance is not None

@@ -23,6 +23,24 @@ class BaselineName(StrEnum):
     TOP_RS_TRAILING = "top_rs_trailing"
     MOMENTUM_12_1 = "momentum_12_1"
     MEAN_REVERT = "mean_revert"
+    # -- TASK-024 exploration candidates --
+    RS_MOMENTUM_TRAIL = "rs_momentum_trail"
+    RS_MOMENTUM_CASH = "rs_momentum_cash"
+    DUAL_MOMENTUM = "dual_momentum"
+    TREND_FOLLOW = "trend_follow"
+    VOLATILITY_BREAK = "volatility_break"
+    RS_ROTATION_MONTHLY = "rs_rotation_monthly"
+
+
+#: The six candidates explored (and validated) in TASK-024.
+EXPLORATION_CANDIDATES: tuple[BaselineName, ...] = (
+    BaselineName.RS_MOMENTUM_TRAIL,
+    BaselineName.RS_MOMENTUM_CASH,
+    BaselineName.DUAL_MOMENTUM,
+    BaselineName.TREND_FOLLOW,
+    BaselineName.VOLATILITY_BREAK,
+    BaselineName.RS_ROTATION_MONTHLY,
+)
 
 
 class BaselineConfig(BaseModel):
@@ -69,6 +87,15 @@ class BaselineConfig(BaseModel):
     )
     mean_revert_hold: int = Field(
         default=10, ge=1, description="Max holding period for mean reversion."
+    )
+    index_symbol: str = Field(
+        default="NIFTY", min_length=1, description="Benchmark index for the trend gate."
+    )
+    vol_breakout_lookback: int = Field(
+        default=20, ge=1, description="Lookback high a volatility breakout must clear."
+    )
+    vol_expansion_lookback: int = Field(
+        default=10, ge=1, description="Bars back the ATR must exceed to be 'expanding'."
     )
 
 

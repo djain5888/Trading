@@ -87,6 +87,16 @@ class BaselineContext:
         """Return the latest ATR, or ``None`` on short history."""
         return self._last(candles, "atr", period=period)
 
+    def atr_series(self, candles: Sequence[Candle], period: int) -> list[float]:
+        """Return the full ATR series, or ``[]`` on short history."""
+        try:
+            results = self._indicators.compute_from_candles(
+                candles, "atr", period=period
+            )
+        except IndicatorError:
+            return []
+        return [result.value for result in results]
+
     def rsi(self, candles: Sequence[Candle], period: int) -> float | None:
         """Return the latest RSI, or ``None`` on short history."""
         return self._last(candles, "rsi", period=period)
@@ -135,3 +145,18 @@ def momentum_12_1(prices: Sequence[float], lookback: int, skip: int) -> float | 
     recent = prices[-1 - skip]
     past = prices[-1 - lookback]
     return recent / past - 1.0 if past > 0 else None
+
+
+def is_new_high(candles: Sequence[Candle], lookback: int) -> bool:
+    """Return whether the latest close clears the prior ``lookback``-bar high."""
+    if len(candles) < lookback + 1:
+        return False
+    prior_high = max(float(candle.high) for candle in candles[-lookback - 1 : -1])
+    return prior_high > 0 and float(candles[-1].close) > prior_high
+
+
+def atr_expanding(atr_series: Sequence[float], lookback: int) -> bool:
+    """Return whether the latest ATR exceeds its value ``lookback`` bars back."""
+    if len(atr_series) <= lookback:
+        return False
+    return atr_series[-1] > atr_series[-1 - lookback]

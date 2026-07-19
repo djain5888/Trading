@@ -14,10 +14,16 @@ from app.backtest.baselines.engine import BaselineEngine
 from app.backtest.baselines.models import BaselineConfig, BaselineName
 from app.backtest.baselines.strategies import (
     BuyAndHold,
+    DualMomentum,
     MeanRevert,
     Momentum121,
+    RSMomentumCash,
+    RSMomentumTrail,
+    RSRotationMonthly,
     TopRSTrailing,
     TopRSWeekly,
+    TrendFollow,
+    VolatilityBreak,
 )
 from app.backtest.guard import LookaheadGuard
 from app.backtest.models import BacktestConfig
@@ -29,6 +35,12 @@ _REGISTRY: dict[BaselineName, Callable[[BaselineConfig], Baseline]] = {
     BaselineName.TOP_RS_TRAILING: TopRSTrailing,
     BaselineName.MOMENTUM_12_1: Momentum121,
     BaselineName.MEAN_REVERT: MeanRevert,
+    BaselineName.RS_MOMENTUM_TRAIL: RSMomentumTrail,
+    BaselineName.RS_MOMENTUM_CASH: RSMomentumCash,
+    BaselineName.DUAL_MOMENTUM: DualMomentum,
+    BaselineName.TREND_FOLLOW: TrendFollow,
+    BaselineName.VOLATILITY_BREAK: VolatilityBreak,
+    BaselineName.RS_ROTATION_MONTHLY: RSRotationMonthly,
 }
 
 

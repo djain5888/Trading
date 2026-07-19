@@ -351,6 +351,79 @@ def baseline(
 
 
 @app.command()
+def validate(
+    windows: int = typer.Option(3, help="Number of non-overlapping windows."),
+    symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to include."),
+    exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
+    interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
+) -> None:
+    """Validate the exploration candidates across non-overlapping history windows."""
+    from datetime import date, timedelta
+
+    from app.backtest.baselines.models import EXPLORATION_CANDIDATES, BaselineConfig
+    from app.backtest.dependencies import load_backtest_history
+    from app.backtest.models import BacktestConfig
+    from app.backtest.validation import ValidationReport, ValidationRunner
+    from app.cli.render import render_validation
+
+    services = _resolve_services()
+    configure_logging(services.settings)
+    universe = list(_watchlist(symbol))
+    config = BacktestConfig(exchange=exchange, interval=interval)
+    tuning = BaselineConfig()
+    runner = ValidationRunner(
+        data_engine=services.data_engine,
+        indicators=services.indicator_engine,
+        calendar=services.calendar,
+        config=config,
+        baseline_config=tuning,
+    )
+
+    async def _run() -> ValidationReport | None:
+        # Pull the maximum history Groww serves, then use all of it.
+        wide_end = date.today()
+        wide_start = wide_end - timedelta(days=8 * 365)
+        try:
+            await load_backtest_history(
+                services, universe, wide_start, wide_end, config
+            )
+        except Exception as exc:  # noqa: BLE001 - best-effort; span check reports it
+            logger.warning("Validation history load failed: %s", exc)
+        span = await runner.stored_range(universe)
+        if span is None:
+            return None
+        span_start, span_end = span
+        # Reserve the strategy lookback before the first window.
+        start = span_start + timedelta(days=tuning.history_days)
+        if (span_end - start).days < windows:
+            logger.warning(
+                "Only %s..%s available after the lookback — too little for %d windows.",
+                start,
+                span_end,
+                windows,
+            )
+            return None
+        return await runner.validate(
+            universe,
+            EXPLORATION_CANDIDATES,
+            start,
+            span_end,
+            window_count=windows,
+            span_start=span_start,
+            span_end=span_end,
+        )
+
+    report = asyncio.run(_run())
+    if report is None:
+        typer.echo(
+            "Validation could not run: no (or too little) stored history for the "
+            "universe. Load candles first (run an import), then retry."
+        )
+        raise typer.Exit(code=1)
+    typer.echo(render_validation(report))
+
+
+@app.command()
 def serve() -> None:
     """Start the FastAPI server (Uvicorn)."""
     from app.main import run as run_server

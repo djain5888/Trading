@@ -15,6 +15,7 @@ from app.backtest.models import (
     ExitAnalysis,
     ExitBreakdown,
 )
+from app.backtest.validation import ValidationReport
 from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
@@ -296,6 +297,56 @@ def render_baseline_comparison(results: Sequence[BaselineResult]) -> str:
     lines.append("")
     lines.append(
         "Positive net expectancy: " + (", ".join(positive) if positive else "none")
+    )
+    return "\n".join(lines)
+
+
+def render_validation(report: ValidationReport) -> str:
+    """Render the strategy-by-window validation matrix and the verdicts."""
+    lines = [
+        "===== Titan Strategy Validation =====",
+        f"History available: {report.span_start.isoformat()} -> "
+        f"{report.span_end.isoformat()}",
+        f"Validated:         {report.start.isoformat()} -> {report.end.isoformat()} "
+        f"({len(report.windows)} windows)",
+        f"Benchmark:         {report.benchmark}   "
+        f"min trades/window: {report.min_trades}",
+        "",
+    ]
+    for window in report.windows:
+        bench = next(
+            c.benchmark_return_pct for c in report.cells if c.window == window.index
+        )
+        lines.append(f"  {window.label}   benchmark {bench:+.2f}%")
+
+    header = f"{'strategy':<20}" + "".join(
+        f"{w.label.split()[0]:>16}" for w in report.windows
+    )
+    lines.extend(
+        ["", "Matrix  (return% / trades, * = beat benchmark, n/a = <min):", header]
+    )
+    by_strategy: dict[str, list[str]] = {}
+    for cell in report.cells:
+        marker = "*" if cell.beats_benchmark else ""
+        text = (
+            f"n/a({cell.trades})"
+            if not cell.evaluable
+            else f"{cell.total_return_pct:+.1f}%/{cell.trades}{marker}"
+        )
+        by_strategy.setdefault(cell.strategy, []).append(text)
+    for verdict in report.verdicts:
+        row = "".join(f"{cell:>16}" for cell in by_strategy.get(verdict.strategy, []))
+        lines.append(f"{verdict.strategy:<20}{row}")
+
+    lines.append("")
+    lines.append("Verdicts:")
+    for verdict in report.verdicts:
+        lines.append(f"  {verdict.strategy:<20} {verdict.note}")
+    passed = report.passed
+    lines.append("")
+    lines.append(
+        "PASSED (edge in the majority of windows): "
+        + (", ".join(passed) if passed else "none — no strategy beat the majority test")
     )
     return "\n".join(lines)
 

@@ -30,6 +30,8 @@ from app.paper.models import ExitReason
 
 #: A tz-aware lower bound used to probe whether any candle is stored at all.
 _EPOCH = datetime(1970, 1, 1, tzinfo=INDIA_TZ)
+#: A tz-aware upper bound for range scans over the whole stored history.
+_FAR_FUTURE = datetime(2100, 1, 1, tzinfo=INDIA_TZ)
 
 
 class PositionLike(Protocol):
@@ -154,6 +156,31 @@ async def any_stored(
         if await data.get_candles(key, _EPOCH, end_dt):
             return True
     return False
+
+
+async def stored_span(
+    data: LookaheadGuard,
+    universe: Sequence[str],
+    exchange: Exchange,
+    interval: Interval,
+) -> tuple[date, date] | None:
+    """Return the common stored date span (all symbols present), or ``None``.
+
+    The span starts at the latest first-candle and ends at the earliest
+    last-candle across the universe, so every symbol has data throughout — the
+    full history available for a fair, comparable validation.
+    """
+    firsts: list[date] = []
+    lasts: list[date] = []
+    for symbol in universe:
+        key = SeriesKey(symbol=symbol, exchange=exchange, interval=interval)
+        candles = await data.get_candles(key, _EPOCH, _FAR_FUTURE)
+        if candles:
+            firsts.append(candles[0].timestamp.date())
+            lasts.append(candles[-1].timestamp.date())
+    if not firsts:
+        return None
+    return max(firsts), min(lasts)
 
 
 def build_report(

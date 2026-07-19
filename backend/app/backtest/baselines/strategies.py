@@ -14,11 +14,24 @@ from app.backtest.baselines.base import (
     BaselineContext,
     BaselinePlan,
     EntryIntent,
+    atr_expanding,
     closes,
+    is_new_high,
     momentum_12_1,
     trailing_return,
 )
 from app.backtest.baselines.models import BaselineConfig, BaselineName
+
+
+async def _index_bullish(
+    ctx: BaselineContext, config: BaselineConfig, day: date
+) -> bool | None:
+    """Return whether the benchmark index is above its trend EMA, or ``None``."""
+    candles = await ctx.history(config.index_symbol, day)
+    ema = ctx.ema(candles, config.trend_ema)
+    if not candles or ema is None:
+        return None
+    return float(candles[-1].close) > ema
 
 
 async def _atr_stop(
@@ -299,3 +312,196 @@ class MeanRevert:
                     )
                 )
         return BaselinePlan(tuple(entries), frozenset(exits))
+
+
+# -- TASK-024 exploration candidates ---------------------------------------
+
+
+class RSMomentumTrail(TopRSTrailing):
+    """Top-N by RS, ATR trailing stop, weekly rebalance (a named alias)."""
+
+    name = BaselineName.RS_MOMENTUM_TRAIL.value
+
+
+class RSMomentumCash(TopRSTrailing):
+    """RS momentum with a trailing stop that goes fully to cash in a bear index."""
+
+    name = BaselineName.RS_MOMENTUM_CASH.value
+
+    async def plan(
+        self,
+        ctx: BaselineContext,
+        day: date,
+        universe: Sequence[str],
+        held: frozenset[str],
+    ) -> BaselinePlan:
+        """Exit everything (hold cash) when the index is below its trend EMA."""
+        if await _index_bullish(ctx, self._config, day) is False:
+            return BaselinePlan((), held)  # risk-off: close all, open nothing
+        return await super().plan(ctx, day, universe, held)
+
+
+class DualMomentum:
+    """Top-N by RS, but only enter while the index is above its 200-EMA."""
+
+    name = BaselineName.DUAL_MOMENTUM.value
+
+    def __init__(self, config: BaselineConfig) -> None:
+        """Store fixed baseline parameters; per-run rebalance state resets here."""
+        self._config = config
+        self._last_week: tuple[int, int] | None = None
+
+    async def plan(
+        self,
+        ctx: BaselineContext,
+        day: date,
+        universe: Sequence[str],
+        held: frozenset[str],
+    ) -> BaselinePlan:
+        """Weekly: buy the top-N by RS only when the index is in an uptrend."""
+        if not _new_week(day, self._last_week):
+            return BaselinePlan()
+        self._last_week = (day.isocalendar().year, day.isocalendar().week)
+        if await _index_bullish(ctx, self._config, day) is False:
+            return BaselinePlan()  # absolute filter fails → hold cash for new capital
+        entries = await _top_entries(
+            ctx,
+            self._config,
+            universe,
+            day,
+            held,
+            "rs",
+            uses_stop=False,
+            trailing_distance=None,
+            max_hold=self._config.hold_days,
+            trail_for_sizing=False,
+        )
+        return BaselinePlan(tuple(entries))
+
+
+class TrendFollow:
+    """Own each symbol while it trades above its 200-EMA; exit when it drops below."""
+
+    name = BaselineName.TREND_FOLLOW.value
+
+    def __init__(self, config: BaselineConfig) -> None:
+        """Store fixed baseline parameters."""
+        self._config = config
+
+    async def plan(
+        self,
+        ctx: BaselineContext,
+        day: date,
+        universe: Sequence[str],
+        held: frozenset[str],
+    ) -> BaselinePlan:
+        """Enter symbols above the trend EMA; flag held names that fell below it."""
+        entries: list[EntryIntent] = []
+        exits: set[str] = set()
+        for symbol in universe:
+            candles = await ctx.history(symbol, day)
+            ema = ctx.ema(candles, self._config.trend_ema)
+            if not candles or ema is None:
+                continue
+            close = float(candles[-1].close)
+            if symbol in held:
+                if close < ema:
+                    exits.add(symbol)
+                continue
+            atr = ctx.atr(candles, self._config.atr_period)
+            if close > ema and atr is not None and atr > 0:
+                entries.append(
+                    EntryIntent(
+                        symbol=symbol,
+                        signal_price=close,
+                        stop_distance=atr * self._config.stop_atr_mult,
+                        uses_stop=False,
+                        trailing_distance=None,
+                        max_hold=None,
+                    )
+                )
+        return BaselinePlan(tuple(entries), frozenset(exits))
+
+
+class VolatilityBreak:
+    """Buy N-day-high breakouts confirmed by ATR expansion; ride an ATR trail."""
+
+    name = BaselineName.VOLATILITY_BREAK.value
+
+    def __init__(self, config: BaselineConfig) -> None:
+        """Store fixed baseline parameters."""
+        self._config = config
+
+    async def plan(
+        self,
+        ctx: BaselineContext,
+        day: date,
+        universe: Sequence[str],
+        held: frozenset[str],
+    ) -> BaselinePlan:
+        """Enter fresh breakouts on expanding volatility, held by a trailing stop."""
+        entries: list[EntryIntent] = []
+        for symbol in universe:
+            if symbol in held:
+                continue
+            candles = await ctx.history(symbol, day)
+            if not is_new_high(candles, self._config.vol_breakout_lookback):
+                continue
+            series = ctx.atr_series(candles, self._config.atr_period)
+            if not atr_expanding(series, self._config.vol_expansion_lookback):
+                continue
+            atr = series[-1]
+            if atr <= 0:
+                continue
+            trail = atr * self._config.trail_atr_mult
+            entries.append(
+                EntryIntent(
+                    symbol=symbol,
+                    signal_price=float(candles[-1].close),
+                    stop_distance=trail,
+                    uses_stop=True,
+                    trailing_distance=trail,
+                    max_hold=None,
+                )
+            )
+        return BaselinePlan(tuple(entries))
+
+
+class RSRotationMonthly:
+    """Top-N by RS, rotated monthly (not weekly): rebalance to the leaders."""
+
+    name = BaselineName.RS_ROTATION_MONTHLY.value
+
+    def __init__(self, config: BaselineConfig) -> None:
+        """Store fixed baseline parameters; per-run rebalance state resets here."""
+        self._config = config
+        self._last_month: tuple[int, int] | None = None
+
+    async def plan(
+        self,
+        ctx: BaselineContext,
+        day: date,
+        universe: Sequence[str],
+        held: frozenset[str],
+    ) -> BaselinePlan:
+        """Monthly: hold exactly the top-N by RS; drop names that fell out."""
+        month = (day.year, day.month)
+        if month == self._last_month:
+            return BaselinePlan()
+        self._last_month = month
+        ranked = await _rank_by(ctx, self._config, universe, day, "rs")
+        target = set(ranked[: self._config.top_n])
+        entries = await _top_entries(
+            ctx,
+            self._config,
+            universe,
+            day,
+            held,
+            "rs",
+            uses_stop=False,
+            trailing_distance=None,
+            max_hold=None,
+            trail_for_sizing=False,
+        )
+        exits = frozenset(symbol for symbol in held if symbol not in target)
+        return BaselinePlan(tuple(entries), exits)
