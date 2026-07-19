@@ -22,7 +22,12 @@ from datetime import date, datetime, timedelta
 
 from app.backtest import metrics
 from app.backtest.guard import LookaheadGuard
-from app.backtest.models import BacktestConfig, BacktestReport, BacktestTrade
+from app.backtest.models import (
+    BacktestConfig,
+    BacktestReport,
+    BacktestTrade,
+    ExitKind,
+)
 from app.core.logging import get_logger
 from app.core.timezone import INDIA_TZ
 from app.market.calendar.service import MarketCalendarService
@@ -59,6 +64,7 @@ class _OpenPosition:
     strategy: str
     regime: str | None
     entry_date: date
+    signal_price: float
     entry_price: float
     stop: float
     target: float
@@ -229,6 +235,7 @@ class BacktestEngine:
                     strategy=setup.strategy,
                     regime=item.regime,
                     entry_date=day,
+                    signal_price=setup.entry,
                     entry_price=entry,
                     stop=setup.stop,
                     target=setup.target,
@@ -273,7 +280,11 @@ class BacktestEngine:
         if candle is None:
             if force:  # no candle at the window end — close flat at the entry price
                 return self._close(
-                    position, day, position.entry_price, ExitReason.TIMEOUT
+                    position,
+                    day,
+                    position.entry_price,
+                    ExitReason.TIMEOUT,
+                    ExitKind.END_OF_BACKTEST,
                 )
             return None
         if candle.timestamp.date() <= position.entry_date and not force:
@@ -284,21 +295,40 @@ class BacktestEngine:
             float(candle.high),
             float(candle.close),
         )
-        if open_p <= position.stop:
-            return self._close(position, day, open_p, ExitReason.STOP)
+        if open_p <= position.stop:  # gapped through the stop → filled worse
+            return self._close(
+                position, day, open_p, ExitReason.STOP, ExitKind.GAP_EXIT
+            )
         if low <= position.stop:
-            return self._close(position, day, position.stop, ExitReason.STOP)
-        if open_p >= position.target:
-            return self._close(position, day, open_p, ExitReason.TARGET)
+            return self._close(
+                position, day, position.stop, ExitReason.STOP, ExitKind.STOP_HIT
+            )
+        if open_p >= position.target:  # gapped through the target
+            return self._close(
+                position, day, open_p, ExitReason.TARGET, ExitKind.GAP_EXIT
+            )
         if high >= position.target:
-            return self._close(position, day, position.target, ExitReason.TARGET)
+            return self._close(
+                position, day, position.target, ExitReason.TARGET, ExitKind.TARGET_HIT
+            )
         held_days = (day - position.entry_date).days
-        if force or held_days >= self._config.paper.max_holding_days:
-            return self._close(position, day, close, ExitReason.TIMEOUT)
+        if held_days >= self._config.paper.max_holding_days:
+            return self._close(
+                position, day, close, ExitReason.TIMEOUT, ExitKind.TIMEOUT
+            )
+        if force:  # survived to the end of the window — force a flat close
+            return self._close(
+                position, day, close, ExitReason.TIMEOUT, ExitKind.END_OF_BACKTEST
+            )
         return None
 
     def _close(
-        self, position: _OpenPosition, day: date, level: float, reason: ExitReason
+        self,
+        position: _OpenPosition,
+        day: date,
+        level: float,
+        reason: ExitReason,
+        kind: ExitKind,
     ) -> BacktestTrade:
         """Build the closed-trade record, net of slippage and charges."""
         exit_fill = self._exit_fill(level)
@@ -315,12 +345,14 @@ class BacktestEngine:
             regime=position.regime,
             entry_date=position.entry_date,
             exit_date=day,
+            signal_price=round(position.signal_price, 4),
             entry_price=round(position.entry_price, 4),
             exit_price=round(exit_fill, 4),
             stop_price=round(position.stop, 4),
             target_price=round(position.target, 4),
             size=position.size,
             exit_reason=reason,
+            exit_kind=kind,
             gross_pnl=round(gross, 2),
             costs=round(charges, 2),
             net_pnl=round(net, 2),
@@ -517,6 +549,7 @@ class BacktestEngine:
             per_regime=metrics.per_regime(ordered),
             monthly=metrics.monthly_returns(ordered, starting),
             closed_trades=tuple(ordered),
+            exit_analysis=metrics.exit_analysis(ordered),
             generated_at=self._eod(end),
         )
 

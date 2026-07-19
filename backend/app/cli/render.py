@@ -6,7 +6,7 @@ separate from the Typer commands so they are unit-testable.
 
 from __future__ import annotations
 
-from app.backtest.models import BacktestReport
+from app.backtest.models import BacktestReport, ExitAnalysis, ExitBreakdown
 from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
@@ -263,8 +263,45 @@ def render_backtest(report: BacktestReport) -> str:
                 f"  {month.month} trades={month.trades} "
                 f"pnl={month.net_pnl:+.2f} ({month.return_pct:+.2f}%)"
             )
+    lines.extend(_render_exit_analysis(report.exit_analysis))
     lines.append(f"Generated:        {report.generated_at.isoformat()}")
     return "\n".join(lines)
+
+
+def _render_exit_breakdown(rows: tuple[ExitBreakdown, ...]) -> list[str]:
+    """Render one exit-reason breakdown block."""
+    return [
+        f"    {row.kind:<16} n={row.trades:<4} win={row.wins:<4} "
+        f"avgR={row.avg_r:+.2f} hold={row.avg_holding_days:.1f}d "
+        f"pnl={row.total_pnl:+.2f}"
+        for row in rows
+    ]
+
+
+def _render_exit_analysis(analysis: ExitAnalysis) -> list[str]:
+    """Render the exit diagnostics (breakdown, winner R, slippage, BULL)."""
+    if not analysis.by_reason:
+        return []
+    dist = analysis.winner_r
+    lines = ["Exit Analysis:", "  By exit reason:"]
+    lines.extend(_render_exit_breakdown(analysis.by_reason))
+    lines.append(
+        f"  Winners' R:      {dist.winners} total  "
+        f">=2R={dist.reached_2r}  1-2R={dist.between_1_and_2r}  "
+        f"0-1R={dist.between_0_and_1r}"
+    )
+    lines.append(
+        f"  Timeouts:        {analysis.timeout_trades} closed "
+        f"({analysis.timeout_profitable} profitable at close)"
+    )
+    lines.append(
+        f"  Entry slippage:  {analysis.avg_entry_slippage:+.4f}/share "
+        f"({analysis.avg_entry_slippage_pct:+.3f}% vs signal)"
+    )
+    if analysis.bull_by_reason:
+        lines.append("  BULL-regime exits:")
+        lines.extend(_render_exit_breakdown(analysis.bull_by_reason))
+    return lines
 
 
 def _regime_summary(report: RegimeReport | None) -> str:

@@ -14,12 +14,22 @@ from statistics import fmean
 
 from app.backtest.models import (
     BacktestTrade,
+    ExitAnalysis,
+    ExitBreakdown,
+    ExitKind,
     MonthlyReturn,
     RegimePerformance,
     StrategyPerformance,
+    WinnerRDistribution,
 )
 
 _UNKNOWN_REGIME = "UNKNOWN"
+_BULL_REGIME = "BULL"
+
+
+def _holding_days(trade: BacktestTrade) -> int:
+    """Return the calendar days a trade was held (entry to exit)."""
+    return (trade.exit_date - trade.entry_date).days
 
 
 def _ordered(trades: Sequence[BacktestTrade]) -> list[BacktestTrade]:
@@ -146,3 +156,58 @@ def per_regime(trades: Sequence[BacktestTrade]) -> tuple[RegimePerformance, ...]
         for regime, bucket in buckets.items()
     ]
     return tuple(sorted(rows, key=lambda r: r.total_pnl, reverse=True))
+
+
+def exit_breakdown(trades: Sequence[BacktestTrade]) -> tuple[ExitBreakdown, ...]:
+    """Count, expectancy and holding time grouped by fine-grained exit kind."""
+    buckets: dict[str, list[BacktestTrade]] = defaultdict(list)
+    for trade in trades:
+        buckets[trade.exit_kind.value].append(trade)
+    rows = [
+        ExitBreakdown(
+            kind=kind,
+            trades=len(bucket),
+            wins=sum(1 for t in bucket if t.net_pnl > 0),
+            avg_r=round(fmean(t.r_multiple for t in bucket), 3),
+            avg_holding_days=round(fmean(_holding_days(t) for t in bucket), 1),
+            total_pnl=round(sum(t.net_pnl for t in bucket), 2),
+        )
+        for kind, bucket in buckets.items()
+    ]
+    return tuple(sorted(rows, key=lambda r: r.trades, reverse=True))
+
+
+def winner_r_distribution(trades: Sequence[BacktestTrade]) -> WinnerRDistribution:
+    """Bucket winning trades by how far they ran in R versus the 2R target."""
+    winners = [t for t in trades if t.net_pnl > 0]
+    return WinnerRDistribution(
+        winners=len(winners),
+        reached_2r=sum(1 for t in winners if t.r_multiple >= 2.0),
+        between_1_and_2r=sum(1 for t in winners if 1.0 <= t.r_multiple < 2.0),
+        between_0_and_1r=sum(1 for t in winners if 0.0 < t.r_multiple < 1.0),
+    )
+
+
+def exit_analysis(trades: Sequence[BacktestTrade]) -> ExitAnalysis:
+    """Assemble the exit diagnostics that explain where expectancy leaks out."""
+    if not trades:
+        return ExitAnalysis()
+    timeouts = [t for t in trades if t.exit_kind is ExitKind.TIMEOUT]
+    bull = [t for t in trades if t.regime == _BULL_REGIME]
+    return ExitAnalysis(
+        by_reason=exit_breakdown(trades),
+        winner_r=winner_r_distribution(trades),
+        timeout_trades=len(timeouts),
+        timeout_profitable=sum(1 for t in timeouts if t.net_pnl > 0),
+        avg_entry_slippage_pct=round(
+            fmean(
+                (t.entry_price - t.signal_price) / t.signal_price * 100.0
+                for t in trades
+            ),
+            4,
+        ),
+        avg_entry_slippage=round(
+            fmean(t.entry_price - t.signal_price for t in trades), 4
+        ),
+        bull_by_reason=exit_breakdown(bull),
+    )

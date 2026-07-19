@@ -12,7 +12,12 @@ import pytest
 from app.backtest import metrics
 from app.backtest.engine import BacktestEngine
 from app.backtest.guard import LookaheadError, LookaheadGuard
-from app.backtest.models import BacktestConfig, BacktestCosts, BacktestTrade
+from app.backtest.models import (
+    BacktestConfig,
+    BacktestCosts,
+    BacktestTrade,
+    ExitKind,
+)
 from app.core.clock import FakeClock
 from app.core.timezone import INDIA_TZ
 from app.indicators.dependencies import get_indicator_registry
@@ -234,6 +239,8 @@ async def test_entry_fills_next_day_open_and_hits_target() -> None:
     assert trade.entry_price == 100.0
     assert trade.exit_date == _WED
     assert trade.exit_reason is ExitReason.TARGET
+    assert trade.exit_kind is ExitKind.TARGET_HIT
+    assert trade.signal_price == 100.0  # the setup's reference entry
     assert trade.exit_price == 110.0
     assert trade.size == 200.0  # 1% of 100k / 5.00 risk-per-share
     assert trade.net_pnl == 2000.0
@@ -289,6 +296,7 @@ async def test_gap_past_stop_fills_at_open_not_stop() -> None:
     trade = report.closed_trades[0]
 
     assert trade.exit_reason is ExitReason.STOP
+    assert trade.exit_kind is ExitKind.GAP_EXIT  # gap, not a clean stop
     assert trade.exit_price == 90.0  # filled at the gapped open, not the 95 stop
     assert trade.net_pnl == -2000.0  # worse than the -1000 a clean stop would give
 
@@ -312,6 +320,9 @@ async def test_no_position_on_entry_bar_and_timeout_close() -> None:
     trade = report.closed_trades[0]
     assert trade.entry_date == _TUE
     assert trade.exit_reason is ExitReason.TIMEOUT
+    # Held < max_holding_days but the window ended: an end-of-backtest close,
+    # not a holding-period timeout — the finer exit kind distinguishes them.
+    assert trade.exit_kind is ExitKind.END_OF_BACKTEST
     assert trade.exit_date == _FRI  # closed at the last replayed day
 
 
@@ -368,21 +379,31 @@ async def test_rejects_inverted_range() -> None:
 
 
 def _trade(
-    net: float, r: float, *, strategy: str = "breakout", regime: str = "BULL", day: date
+    net: float,
+    r: float,
+    *,
+    strategy: str = "breakout",
+    regime: str = "BULL",
+    day: date,
+    exit_kind: ExitKind = ExitKind.TARGET_HIT,
+    hold: int = 1,
+    signal_price: float = 100.0,
 ) -> BacktestTrade:
-    """Build a closed trade carrying a known net P&L and R multiple."""
+    """Build a closed trade carrying a known net P&L, R multiple and exit kind."""
     return BacktestTrade(
         symbol="AAA",
         strategy=strategy,
         regime=regime,
-        entry_date=day - timedelta(days=1),
+        entry_date=day - timedelta(days=hold),
         exit_date=day,
+        signal_price=signal_price,
         entry_price=100.0,
         exit_price=max(1.0, 100.0 + net),
         stop_price=95.0,
         target_price=110.0,
         size=1.0,
         exit_reason=ExitReason.TARGET if net >= 0 else ExitReason.STOP,
+        exit_kind=exit_kind,
         gross_pnl=net,
         costs=0.0,
         net_pnl=net,
@@ -439,6 +460,80 @@ def test_metrics_handle_empty_input() -> None:
     assert metrics.expectancy_r([]) == 0.0
     assert metrics.max_drawdown_pct([], 1000.0) == 0.0
     assert metrics.longest_losing_streak([]) == 0
+    assert metrics.exit_analysis([]).by_reason == ()
+
+
+# -- Exit diagnostics (hand-computed inputs) -------------------------------
+
+
+def test_exit_breakdown_accounts_by_kind() -> None:
+    """Exit breakdown counts, wins, avg R and holding days per exit kind."""
+    trades = [
+        _trade(200.0, 2.0, day=date(2025, 1, 6), exit_kind=ExitKind.TARGET_HIT, hold=3),
+        _trade(150.0, 1.5, day=date(2025, 1, 7), exit_kind=ExitKind.TARGET_HIT, hold=5),
+        _trade(-100.0, -1.0, day=date(2025, 1, 8), exit_kind=ExitKind.STOP_HIT, hold=2),
+        _trade(-90.0, -0.9, day=date(2025, 1, 9), exit_kind=ExitKind.GAP_EXIT, hold=1),
+        _trade(50.0, 0.5, day=date(2025, 1, 10), exit_kind=ExitKind.TIMEOUT, hold=10),
+        _trade(-30.0, -0.3, day=date(2025, 1, 13), exit_kind=ExitKind.TIMEOUT, hold=10),
+    ]
+
+    by_kind = {row.kind: row for row in metrics.exit_breakdown(trades)}
+    assert by_kind["target_hit"].trades == 2
+    assert by_kind["target_hit"].wins == 2
+    assert by_kind["target_hit"].avg_r == 1.75  # mean(2.0, 1.5)
+    assert by_kind["target_hit"].avg_holding_days == 4.0  # mean(3, 5)
+    assert by_kind["timeout"].trades == 2
+    assert by_kind["timeout"].total_pnl == 20.0  # +50 - 30
+
+
+def test_exit_analysis_winner_distribution_and_timeouts() -> None:
+    """Winner R buckets, timeout profitability and end-to-end wiring are correct."""
+    trades = [
+        _trade(200.0, 2.0, day=date(2025, 1, 6), exit_kind=ExitKind.TARGET_HIT),
+        _trade(150.0, 1.5, day=date(2025, 1, 7), exit_kind=ExitKind.TARGET_HIT),
+        _trade(50.0, 0.5, day=date(2025, 1, 10), exit_kind=ExitKind.TIMEOUT, hold=10),
+        _trade(-30.0, -0.3, day=date(2025, 1, 13), exit_kind=ExitKind.TIMEOUT, hold=10),
+        _trade(-20.0, -0.2, day=date(2025, 1, 14), exit_kind=ExitKind.END_OF_BACKTEST),
+    ]
+
+    analysis = metrics.exit_analysis(trades)
+    dist = analysis.winner_r
+    assert dist.winners == 3  # +200, +150, +50
+    assert dist.reached_2r == 1  # only the R=2.0 winner realised the 2R target
+    assert dist.between_1_and_2r == 1  # R=1.5
+    assert dist.between_0_and_1r == 1  # R=0.5
+    assert analysis.timeout_trades == 2
+    assert analysis.timeout_profitable == 1  # only the +50 timeout was green
+
+
+def test_exit_analysis_measures_slippage_and_bull_segment() -> None:
+    """Entry slippage vs signal price and the BULL-only breakdown are reported."""
+    trades = [
+        _trade(
+            10.0,
+            0.1,
+            day=date(2025, 1, 6),
+            regime="BULL",
+            exit_kind=ExitKind.STOP_HIT,
+            signal_price=99.75,
+        ),
+        _trade(
+            200.0,
+            2.0,
+            day=date(2025, 1, 7),
+            regime="BEAR",
+            exit_kind=ExitKind.TARGET_HIT,
+            signal_price=99.75,
+        ),
+    ]
+
+    analysis = metrics.exit_analysis(trades)
+    # Fills at 100.0 vs a 99.75 signal: +0.25/share, ~+0.2506%.
+    assert analysis.avg_entry_slippage == 0.25
+    assert analysis.avg_entry_slippage_pct == round(0.25 / 99.75 * 100.0, 4)
+    bull = {row.kind: row for row in analysis.bull_by_reason}
+    assert set(bull) == {"stop_hit"}  # only the BULL trade is segmented in
+    assert bull["stop_hit"].trades == 1
 
 
 # -- Integration: the real strategy path under the guard -------------------
