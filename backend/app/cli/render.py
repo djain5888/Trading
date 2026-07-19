@@ -6,7 +6,12 @@ separate from the Typer commands so they are unit-testable.
 
 from __future__ import annotations
 
-from app.backtest.models import BacktestReport, ExitAnalysis, ExitBreakdown
+from app.backtest.models import (
+    BacktestReport,
+    ExecutionLeakage,
+    ExitAnalysis,
+    ExitBreakdown,
+)
 from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
@@ -264,8 +269,56 @@ def render_backtest(report: BacktestReport) -> str:
                 f"pnl={month.net_pnl:+.2f} ({month.return_pct:+.2f}%)"
             )
     lines.extend(_render_exit_analysis(report.exit_analysis))
+    if report.trades:
+        lines.extend(_render_execution_leakage(report.execution_leakage))
     lines.append(f"Generated:        {report.generated_at.isoformat()}")
     return "\n".join(lines)
+
+
+def _render_execution_leakage(leakage: ExecutionLeakage) -> list[str]:
+    """Render the execution-leakage diagnostics."""
+    stops, targets, rc, pnl = (
+        leakage.stops,
+        leakage.targets,
+        leakage.r_consistency,
+        leakage.pnl,
+    )
+    lines = ["Execution Leakage:"]
+    if stops.trades:
+        lines.append(
+            f"  Stops ({stops.trades}): overshoot avg={stops.avg_overshoot_pct:+.3f}% "
+            f"median={stops.median_overshoot_pct:+.3f}% "
+            f"worst={stops.worst_overshoot_pct:+.3f}%"
+        )
+        lines.append(
+            f"    beyond -1R: {stops.avg_overshoot_r:+.3f}R "
+            f"(gap={stops.avg_gap_r:+.3f} slip={stops.avg_slippage_r:+.3f} "
+            f"cost={stops.avg_cost_r:+.3f})"
+        )
+    if targets.trades:
+        lines.append(
+            f"  Targets ({targets.trades}): intended={targets.intended_r:.2f}R "
+            f"realised={targets.avg_realised_r:.2f}R "
+            f"(vs intended-risk {targets.avg_realised_r_intended_risk:.2f}R)  "
+            f"entry drift={targets.avg_entry_displacement_pct:+.3f}%"
+        )
+    lines.append(
+        f"  R audit: recorded={rc.avg_r_recorded:+.3f}R "
+        f"intended-risk={rc.avg_r_intended_risk:+.3f}R "
+        f"|diff|={rc.avg_abs_discrepancy_r:.3f}R "
+        f"(actual-entry denom={rc.denominator_uses_actual_entry})"
+    )
+    lines.append(
+        f"  P&L split: edge={pnl.strategy_edge:+.2f} "
+        f"entry_gap={pnl.entry_gap:+.2f} entry_slip={pnl.entry_slippage:+.2f} "
+        f"exit_slip={pnl.exit_slippage:+.2f} charges={pnl.charges:+.2f} "
+        f"=> net={pnl.net_pnl:+.2f}"
+    )
+    lines.append(
+        f"  Perfect-exec expectancy @ {leakage.win_rate:.1f}% win: "
+        f"{leakage.perfect_expectancy_r:+.3f}R/trade"
+    )
+    return lines
 
 
 def _render_exit_breakdown(rows: tuple[ExitBreakdown, ...]) -> list[str]:

@@ -90,7 +90,9 @@ class BacktestTrade(BaseModel):
     entry_date: date = Field(description="Fill date (the day after the signal).")
     exit_date: date = Field(description="Exit date.")
     signal_price: float = Field(gt=0, description="Setup reference price at signal.")
+    entry_open: float = Field(gt=0, description="Next-day open before entry slippage.")
     entry_price: float = Field(gt=0, description="Fill price, incl. entry slippage.")
+    exit_level: float = Field(gt=0, description="Exit level before exit slippage.")
     exit_price: float = Field(gt=0, description="Exit fill price, incl. slippage.")
     stop_price: float = Field(gt=0, description="Stop level at entry.")
     target_price: float = Field(gt=0, description="Target level at entry.")
@@ -198,6 +200,112 @@ class ExitAnalysis(BaseModel):
     )
 
 
+class StopLeakage(BaseModel):
+    """How far stop exits fill beyond the intended stop, and why."""
+
+    model_config = ConfigDict(frozen=True)
+
+    trades: int = Field(default=0, ge=0, description="Stop/gap-stop exits measured.")
+    avg_overshoot_pct: float = Field(
+        default=0.0, description="Mean fill shortfall below the stop (%)."
+    )
+    median_overshoot_pct: float = Field(
+        default=0.0, description="Median fill shortfall below the stop (%)."
+    )
+    worst_overshoot_pct: float = Field(
+        default=0.0, description="Worst fill shortfall below the stop (%)."
+    )
+    avg_overshoot_r: float = Field(
+        default=0.0, description="Mean loss beyond -1R in units of intended risk."
+    )
+    avg_gap_r: float = Field(
+        default=0.0, description="Overshoot from gapping through the stop (R)."
+    )
+    avg_slippage_r: float = Field(
+        default=0.0, description="Overshoot from exit slippage (R)."
+    )
+    avg_cost_r: float = Field(
+        default=0.0, description="Overshoot from brokerage/STT charges (R)."
+    )
+
+
+class TargetLeakage(BaseModel):
+    """Why realised R on target hits falls short of the intended reward."""
+
+    model_config = ConfigDict(frozen=True)
+
+    trades: int = Field(default=0, ge=0, description="Target-hit exits measured.")
+    intended_r: float = Field(
+        default=0.0, description="Mean planned reward, (target-signal)/(signal-stop)."
+    )
+    avg_realised_r: float = Field(
+        default=0.0, description="Mean realised R (as recorded, actual-entry risk)."
+    )
+    avg_realised_r_intended_risk: float = Field(
+        default=0.0, description="Mean realised R against intended (signal-stop) risk."
+    )
+    avg_entry_displacement_pct: float = Field(
+        default=0.0, description="Mean actual entry vs signal price (%)."
+    )
+
+
+class RConsistency(BaseModel):
+    """An audit of how the stored R multiple is computed."""
+
+    model_config = ConfigDict(frozen=True)
+
+    numerator_uses_actual_fill: bool = Field(
+        default=True, description="Whether R's numerator uses actual fills."
+    )
+    denominator_uses_actual_entry: bool = Field(
+        default=True, description="Whether R's risk uses actual entry, not signal."
+    )
+    avg_r_recorded: float = Field(
+        default=0.0, description="Mean recorded R (net / (actual entry - stop))."
+    )
+    avg_r_intended_risk: float = Field(
+        default=0.0, description="Mean R against intended (signal - stop) risk."
+    )
+    avg_abs_discrepancy_r: float = Field(
+        default=0.0, description="Mean |recorded R - intended-risk R|."
+    )
+
+
+class PnlDecomposition(BaseModel):
+    """Total net P&L split into edge versus each execution drag (additive)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    net_pnl: float = Field(default=0.0, description="Total net P&L (the sum below).")
+    strategy_edge: float = Field(
+        default=0.0, description="Frictionless edge: signal entry to exit level."
+    )
+    entry_gap: float = Field(
+        default=0.0, description="Drag from the next-day-open vs signal price."
+    )
+    entry_slippage: float = Field(default=0.0, description="Entry execution slippage.")
+    exit_slippage: float = Field(default=0.0, description="Exit execution slippage.")
+    charges: float = Field(default=0.0, description="Brokerage/STT charges.")
+
+
+class ExecutionLeakage(BaseModel):
+    """Precise measurement of where planned R is lost to execution."""
+
+    model_config = ConfigDict(frozen=True)
+
+    stops: StopLeakage = Field(default_factory=StopLeakage)
+    targets: TargetLeakage = Field(default_factory=TargetLeakage)
+    r_consistency: RConsistency = Field(default_factory=RConsistency)
+    pnl: PnlDecomposition = Field(default_factory=PnlDecomposition)
+    win_rate: float = Field(
+        default=0.0, ge=0, le=100, description="Observed win rate (%)."
+    )
+    perfect_expectancy_r: float = Field(
+        default=0.0,
+        description="Expectancy at the observed win rate with perfect +2R/-1R.",
+    )
+
+
 class BacktestReport(BaseModel):
     """The measured expectancy of the strategy path over a historical window."""
 
@@ -238,6 +346,9 @@ class BacktestReport(BaseModel):
     )
     exit_analysis: ExitAnalysis = Field(
         default_factory=ExitAnalysis, description="Exit-reason diagnostics."
+    )
+    execution_leakage: ExecutionLeakage = Field(
+        default_factory=ExecutionLeakage, description="Execution-leakage diagnostics."
     )
     generated_at: datetime = Field(description="Deterministic report timestamp.")
 

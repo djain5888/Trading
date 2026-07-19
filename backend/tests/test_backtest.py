@@ -388,8 +388,18 @@ def _trade(
     exit_kind: ExitKind = ExitKind.TARGET_HIT,
     hold: int = 1,
     signal_price: float = 100.0,
+    entry_price: float = 100.0,
+    entry_open: float | None = None,
+    exit_price: float | None = None,
+    exit_level: float | None = None,
+    stop_price: float = 95.0,
+    target_price: float = 110.0,
+    size: float = 1.0,
+    costs: float = 0.0,
+    exit_reason: ExitReason | None = None,
 ) -> BacktestTrade:
     """Build a closed trade carrying a known net P&L, R multiple and exit kind."""
+    fill = exit_price if exit_price is not None else max(1.0, 100.0 + net)
     return BacktestTrade(
         symbol="AAA",
         strategy=strategy,
@@ -397,15 +407,21 @@ def _trade(
         entry_date=day - timedelta(days=hold),
         exit_date=day,
         signal_price=signal_price,
-        entry_price=100.0,
-        exit_price=max(1.0, 100.0 + net),
-        stop_price=95.0,
-        target_price=110.0,
-        size=1.0,
-        exit_reason=ExitReason.TARGET if net >= 0 else ExitReason.STOP,
+        entry_open=entry_open if entry_open is not None else entry_price,
+        entry_price=entry_price,
+        exit_level=exit_level if exit_level is not None else fill,
+        exit_price=fill,
+        stop_price=stop_price,
+        target_price=target_price,
+        size=size,
+        exit_reason=(
+            exit_reason
+            if exit_reason is not None
+            else (ExitReason.TARGET if net >= 0 else ExitReason.STOP)
+        ),
         exit_kind=exit_kind,
         gross_pnl=net,
-        costs=0.0,
+        costs=costs,
         net_pnl=net,
         r_multiple=r,
     )
@@ -534,6 +550,181 @@ def test_exit_analysis_measures_slippage_and_bull_segment() -> None:
     bull = {row.kind: row for row in analysis.bull_by_reason}
     assert set(bull) == {"stop_hit"}  # only the BULL trade is segmented in
     assert bull["stop_hit"].trades == 1
+
+
+# -- Execution leakage (hand-computed inputs) ------------------------------
+
+
+def _stop_trade(
+    exit_level: float, exit_price: float, *, kind: ExitKind, day: date
+) -> BacktestTrade:
+    """A stop-side trade: signal 100, stop 95, size 10, 2.0 charges."""
+    net = round((exit_price - 100.0) * 10.0 - 2.0, 2)
+    return _trade(
+        net,
+        round(net / 50.0, 4),  # recorded R vs actual entry (== signal here)
+        day=day,
+        exit_kind=kind,
+        exit_reason=ExitReason.STOP,
+        signal_price=100.0,
+        entry_open=100.0,
+        entry_price=100.0,
+        exit_level=exit_level,
+        exit_price=exit_price,
+        stop_price=95.0,
+        target_price=110.0,
+        size=10.0,
+        costs=2.0,
+    )
+
+
+def test_stop_leakage_decomposes_gap_slippage_cost() -> None:
+    """Stop overshoot splits into gap-through-stop, slippage and cost, in R."""
+    trades = [
+        # Clean stop: filled 0.3 below the 95 stop by slippage only.
+        _stop_trade(95.0, 94.7, kind=ExitKind.STOP_HIT, day=date(2025, 1, 6)),
+        # Gap through the stop: opened at 93 (2 below), then 0.1 slippage.
+        _stop_trade(93.0, 92.9, kind=ExitKind.GAP_EXIT, day=date(2025, 1, 7)),
+    ]
+
+    stops = metrics.execution_leakage(trades).stops
+    assert stops.trades == 2
+    # Overshoot % of the stop: (95-94.7)/95 and (95-92.9)/95.
+    assert stops.worst_overshoot_pct == round((95.0 - 92.9) / 95.0 * 100.0, 4)
+    assert stops.avg_overshoot_pct == round(
+        ((95.0 - 94.7) / 95.0 + (95.0 - 92.9) / 95.0) * 100.0 / 2.0, 4
+    )
+    # In R (intended risk = signal-stop = 5): gap avg (0 + 2/5)/2 = 0.2, etc.
+    assert stops.avg_gap_r == 0.2
+    assert stops.avg_slippage_r == 0.04  # mean(0.3/5, 0.1/5)
+    assert stops.avg_cost_r == 0.04  # mean(0.2/5, 0.2/5)
+    assert stops.avg_overshoot_r == round(0.2 + 0.04 + 0.04, 4)
+
+
+def test_target_leakage_explains_r_shortfall_from_entry_drift() -> None:
+    """A clean 2R target realises <2R because the entry gapped up from signal."""
+    trade = _trade(
+        80.0,
+        round(80.0 / 70.0, 4),  # recorded R vs actual entry 102 (net 80 / risk 70)
+        day=date(2025, 1, 8),
+        exit_kind=ExitKind.TARGET_HIT,
+        exit_reason=ExitReason.TARGET,
+        signal_price=100.0,
+        entry_open=102.0,  # gapped up 2% overnight
+        entry_price=102.0,
+        exit_level=110.0,
+        exit_price=110.0,
+        stop_price=95.0,
+        target_price=110.0,
+        size=10.0,
+        costs=0.0,
+    )
+
+    targets = metrics.execution_leakage([trade]).targets
+    assert targets.trades == 1
+    assert targets.intended_r == 2.0  # (110-100)/(100-95)
+    assert targets.avg_realised_r == round(80.0 / 70.0, 4)  # actual-entry denom
+    assert targets.avg_realised_r_intended_risk == 1.6  # 80 / (5*10)
+    assert targets.avg_entry_displacement_pct == 2.0  # entry 102 vs signal 100
+
+
+def test_r_consistency_flags_actual_entry_denominator() -> None:
+    """The audit reports recorded vs intended-risk R and their discrepancy."""
+    trade = _trade(
+        80.0,
+        round(80.0 / 70.0, 4),
+        day=date(2025, 1, 8),
+        exit_kind=ExitKind.TARGET_HIT,
+        exit_reason=ExitReason.TARGET,
+        signal_price=100.0,
+        entry_open=102.0,
+        entry_price=102.0,
+        exit_level=110.0,
+        exit_price=110.0,
+        stop_price=95.0,
+        size=10.0,
+    )
+
+    audit = metrics.execution_leakage([trade]).r_consistency
+    assert audit.numerator_uses_actual_fill is True
+    assert audit.denominator_uses_actual_entry is True
+    assert audit.avg_r_recorded == round(80.0 / 70.0, 4)  # 1.1429
+    assert audit.avg_r_intended_risk == 1.6  # 80 / 50
+    assert audit.avg_abs_discrepancy_r == round(abs(80.0 / 70.0 - 1.6), 4)
+
+
+def test_pnl_decomposition_is_additive() -> None:
+    """Net P&L splits exactly into edge minus gap, slippages and charges."""
+    trades = [
+        _stop_trade(95.0, 94.7, kind=ExitKind.STOP_HIT, day=date(2025, 1, 6)),
+        _trade(
+            80.0,
+            round(80.0 / 70.0, 4),
+            day=date(2025, 1, 8),
+            exit_kind=ExitKind.TARGET_HIT,
+            exit_reason=ExitReason.TARGET,
+            signal_price=100.0,
+            entry_open=102.0,
+            entry_price=102.0,
+            exit_level=110.0,
+            exit_price=110.0,
+            stop_price=95.0,
+            size=10.0,
+        ),
+    ]
+
+    pnl = metrics.execution_leakage(trades).pnl
+    # edge: (95-100)*10 + (110-100)*10 = -50 + 100 = 50
+    assert pnl.strategy_edge == 50.0
+    assert pnl.entry_gap == 20.0  # (102-100)*10 on the target trade
+    assert pnl.entry_slippage == 0.0
+    assert pnl.exit_slippage == 3.0  # (95-94.7)*10 on the stop trade
+    assert pnl.charges == 2.0
+    # net = edge - gap - entry_slip - exit_slip - charges = 50-20-0-3-2 = 25
+    assert pnl.net_pnl == 25.0
+    assert pnl.net_pnl == round(sum(t.net_pnl for t in trades), 2)
+
+
+def test_perfect_execution_expectancy_at_observed_win_rate() -> None:
+    """Perfect-execution expectancy is win_rate*2 - (1-win_rate)*1, in R."""
+    trades = [
+        _trade(100.0, 1.0, day=date(2025, 1, 6)),
+        _trade(80.0, 0.8, day=date(2025, 1, 7)),
+        _trade(-40.0, -0.4, day=date(2025, 1, 8)),
+        _trade(-50.0, -0.5, day=date(2025, 1, 9)),
+        _trade(-30.0, -0.3, day=date(2025, 1, 10)),
+    ]
+
+    leakage = metrics.execution_leakage(trades)
+    assert leakage.win_rate == 40.0  # 2 of 5
+    assert leakage.perfect_expectancy_r == round(0.4 * 2.0 - 0.6, 4)  # +0.2
+
+
+async def test_execution_leakage_wires_into_the_report() -> None:
+    """The engine attaches an execution-leakage block whose P&L ties to total."""
+    data = _data()
+    await _seed(
+        data,
+        [
+            _candle("AAA", _MON, 99, 100, 98, 100),
+            _candle("AAA", _TUE, 100, 103, 99, 102),
+            _candle("AAA", _WED, 105, 112, 101, 108),
+        ],
+    )
+    costs = BacktestCosts(slippage_pct=0.15, brokerage_pct=0.03, stt_pct=0.10)
+    engine = _engine(data, {_MON: (_setup(),)}, config=BacktestConfig(costs=costs))
+
+    report = await engine.run(["AAA"], _MON, _FRI)
+    leakage = report.execution_leakage
+
+    # The additive decomposition reconstructs the report's total P&L.
+    assert leakage.pnl.net_pnl == pytest.approx(report.total_pnl, abs=0.02)
+    # A single target-hit win: 100% win rate -> perfect expectancy +2R.
+    assert leakage.win_rate == 100.0
+    assert leakage.perfect_expectancy_r == 2.0
+    # Entry filled above signal by the 0.15% slippage -> positive drift.
+    assert leakage.targets.trades == 1
+    assert leakage.targets.avg_entry_displacement_pct > 0.0
 
 
 # -- Integration: the real strategy path under the guard -------------------

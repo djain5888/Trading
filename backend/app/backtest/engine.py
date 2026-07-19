@@ -65,6 +65,7 @@ class _OpenPosition:
     regime: str | None
     entry_date: date
     signal_price: float
+    entry_open: float
     entry_price: float
     stop: float
     target: float
@@ -221,7 +222,8 @@ class BacktestEngine:
             if candle is None:
                 diag.skips["no_next_day_candle"] += 1
                 continue
-            entry = self._entry_fill(float(candle.open))
+            raw_open = float(candle.open)
+            entry = self._entry_fill(raw_open)
             if not (setup.stop < entry < setup.target):
                 diag.skips["gapped_out_of_levels"] += 1
                 continue  # opened past the stop/target — no valid long to take
@@ -236,6 +238,7 @@ class BacktestEngine:
                     regime=item.regime,
                     entry_date=day,
                     signal_price=setup.entry,
+                    entry_open=raw_open,
                     entry_price=entry,
                     stop=setup.stop,
                     target=setup.target,
@@ -346,7 +349,9 @@ class BacktestEngine:
             entry_date=position.entry_date,
             exit_date=day,
             signal_price=round(position.signal_price, 4),
+            entry_open=round(position.entry_open, 4),
             entry_price=round(position.entry_price, 4),
+            exit_level=round(level, 4),
             exit_price=round(exit_fill, 4),
             stop_price=round(position.stop, 4),
             target_price=round(position.target, 4),
@@ -550,6 +555,7 @@ class BacktestEngine:
             monthly=metrics.monthly_returns(ordered, starting),
             closed_trades=tuple(ordered),
             exit_analysis=metrics.exit_analysis(ordered),
+            execution_leakage=metrics.execution_leakage(ordered),
             generated_at=self._eod(end),
         )
 
