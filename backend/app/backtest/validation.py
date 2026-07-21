@@ -27,6 +27,65 @@ from app.market.historical.engine import HistoricalDataEngine
 
 #: A window with fewer trades than this is statistically NOT EVALUABLE.
 DEFAULT_MIN_TRADES = 30
+#: Approximate calendar days per month, for translating a window span to days.
+_DAYS_PER_MONTH = 30
+
+
+class HistoryCheck(BaseModel):
+    """Whether the confirmed available history can support the requested span."""
+
+    model_config = ConfigDict(frozen=True)
+
+    ok: bool = Field(description="Whether there is enough confirmed history.")
+    confirmed_start: date = Field(description="Earliest confirmed available date.")
+    confirmed_end: date = Field(description="Latest confirmed available date.")
+    usable_start: date = Field(description="First usable date after the lookback.")
+    usable_days: int = Field(description="Usable calendar days after the lookback.")
+    required_days: int = Field(description="Calendar days the request needs.")
+    message: str = Field(description="Human-readable explanation.")
+
+
+def check_history(
+    confirmed_start: date,
+    confirmed_end: date,
+    *,
+    lookback_days: int,
+    windows: int,
+    window_months: int,
+) -> HistoryCheck:
+    """Confirm the available history can cover ``windows`` x ``window_months``.
+
+    The lookback the strategies need is reserved before the first window, so the
+    usable span is what remains. A request that exceeds the confirmed history is
+    refused rather than silently run on fabricated or too-short data.
+    """
+    usable_start = confirmed_start + timedelta(days=lookback_days)
+    usable_days = max(0, (confirmed_end - usable_start).days)
+    required_days = windows * window_months * _DAYS_PER_MONTH
+    ok = required_days > 0 and usable_days >= required_days
+    if ok:
+        message = (
+            f"Confirmed history {confirmed_start}..{confirmed_end}: "
+            f"{usable_days} usable days cover {windows} x {window_months}-month "
+            "windows."
+        )
+    else:
+        message = (
+            f"Refusing to validate: confirmed available history is "
+            f"{confirmed_start}..{confirmed_end} ({usable_days} usable days after a "
+            f"{lookback_days}-day lookback), but {windows} x {window_months}-month "
+            f"windows need ~{required_days} days. Import more history, or request a "
+            "shorter span."
+        )
+    return HistoryCheck(
+        ok=ok,
+        confirmed_start=confirmed_start,
+        confirmed_end=confirmed_end,
+        usable_start=usable_start,
+        usable_days=usable_days,
+        required_days=required_days,
+        message=message,
+    )
 
 
 class WindowSpec(BaseModel):

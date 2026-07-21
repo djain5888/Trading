@@ -13,6 +13,7 @@ from app.backtest.validation import (
     ValidationCell,
     ValidationRunner,
     build_verdict,
+    check_history,
     split_windows,
 )
 from app.core.clock import FakeClock
@@ -51,6 +52,39 @@ def test_split_windows_rejects_bad_inputs() -> None:
         split_windows(date(2022, 1, 1), date(2022, 12, 31), 0)
     with pytest.raises(ValueError):
         split_windows(date(2022, 1, 1), date(2022, 1, 2), 5)
+
+
+# -- Confirmed-history sufficiency check (TASK-025) ------------------------
+
+
+def test_check_history_refuses_short_history() -> None:
+    """~16 months of data cannot support 3 x 12-month windows — refuse."""
+    check = check_history(
+        date(2024, 3, 1),
+        date(2025, 7, 1),
+        lookback_days=430,
+        windows=3,
+        window_months=12,
+    )
+
+    assert check.ok is False
+    assert "Refusing to validate" in check.message
+    assert "2024-03-01..2025-07-01" in check.message  # states the real window
+    assert check.required_days > check.usable_days
+
+
+def test_check_history_accepts_sufficient_history() -> None:
+    """Seven years easily covers 3 x 12-month windows after the lookback."""
+    check = check_history(
+        date(2018, 1, 1),
+        date(2025, 1, 1),
+        lookback_days=430,
+        windows=3,
+        window_months=12,
+    )
+
+    assert check.ok is True
+    assert check.usable_days >= check.required_days
 
 
 # -- The <30-trade guard and the majority verdict --------------------------

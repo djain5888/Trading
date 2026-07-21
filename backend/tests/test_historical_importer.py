@@ -332,6 +332,85 @@ async def test_non_retryable_provider_error() -> None:
     assert summary.candles_imported == 0
 
 
+# -- Out-of-window data rejection (TASK-025) -------------------------------
+
+
+class _OutOfWindowProvider(FakeMarketDataProvider):
+    """Returns a fixed recent candle regardless of the requested window.
+
+    Mirrors Groww serving recent data for a date range it does not actually
+    have (the bug that fabricated a 2018-2025 history from ~340 recent bars).
+    """
+
+    async def get_historical_data(
+        self,
+        symbol: str,
+        interval: Interval,
+        start_date: datetime,
+        end_date: datetime,
+        exchange: Exchange = Exchange.NSE,
+    ) -> HistoricalData:
+        self.calls += 1
+        return HistoricalData(
+            symbol=symbol,
+            exchange=exchange,
+            interval=interval,
+            candles=(_daily_bar(0),),  # dated _BASE (2025), never the requested year
+        )
+
+
+def test_verify_window_rejects_out_of_range_batch() -> None:
+    """The verifier raises on a candle outside the requested window, else passes."""
+    from app.market.historical.importer.exceptions import OutOfWindowDataError
+
+    bars = HistoricalData(
+        symbol="RELIANCE",
+        exchange=Exchange.NSE,
+        interval=Interval.ONE_DAY,
+        candles=(_daily_bar(0),),  # dated 2025-01-06
+    )
+    with pytest.raises(OutOfWindowDataError, match="Out-of-window"):
+        HistoricalImportEngine._verify_window(
+            "RELIANCE",
+            bars,
+            datetime(2018, 1, 1, tzinfo=INDIA_TZ),
+            datetime(2018, 6, 30, tzinfo=INDIA_TZ),
+        )
+    # A window that contains the candle passes without raising.
+    HistoricalImportEngine._verify_window(
+        "RELIANCE",
+        bars,
+        datetime(2025, 1, 1, tzinfo=INDIA_TZ),
+        datetime(2025, 1, 31, tzinfo=INDIA_TZ),
+    )
+
+
+async def test_out_of_window_batch_is_rejected_not_stored(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Recent candles returned for an old window are rejected, never relabelled."""
+    provider = _OutOfWindowProvider({})
+    data_engine = HistoricalDataEngine(InMemoryCandleRepository(), ValidationEngine())
+    engine = _make_engine(
+        provider, data_engine=data_engine, config=ImportConfig(batch_size=100)
+    )
+
+    with caplog.at_level(logging.ERROR):
+        summary = await engine.import_history(
+            ["RELIANCE"],
+            Interval.ONE_DAY,
+            datetime(2018, 1, 1, tzinfo=INDIA_TZ),
+            datetime(2018, 6, 30, tzinfo=INDIA_TZ),
+        )
+
+    key = SeriesKey(symbol="RELIANCE", exchange=Exchange.NSE, interval=Interval.ONE_DAY)
+    assert summary.candles_imported == 0  # nothing stored
+    assert summary.failed_requests >= 1  # the batch was recorded as failed
+    assert await data_engine.count(key) == 0  # the store stays empty
+    assert "Out-of-window data for RELIANCE" in caplog.text  # loud, specific
+    assert "requested 2018-01-01" in caplog.text
+
+
 async def test_daily_import_uses_a_single_provider_call() -> None:
     """A daily import folds a lone trailing day into one call (double-call fix).
 

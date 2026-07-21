@@ -183,6 +183,33 @@ async def stored_span(
     return max(firsts), min(lasts)
 
 
+async def stored_spans(
+    data: LookaheadGuard,
+    universe: Sequence[str],
+    exchange: Exchange,
+    interval: Interval,
+) -> list[tuple[str, date, date, int]]:
+    """Return ``(symbol, first_date, last_date, count)`` for each stored symbol.
+
+    The true earliest date confirmed available per symbol — the evidence for what
+    the provider actually serves, once out-of-window data has been rejected.
+    """
+    spans: list[tuple[str, date, date, int]] = []
+    for symbol in universe:
+        key = SeriesKey(symbol=symbol, exchange=exchange, interval=interval)
+        candles = await data.get_candles(key, _EPOCH, _FAR_FUTURE)
+        if candles:
+            spans.append(
+                (
+                    symbol,
+                    candles[0].timestamp.date(),
+                    candles[-1].timestamp.date(),
+                    len(candles),
+                )
+            )
+    return spans
+
+
 def build_report(
     *,
     universe: tuple[str, ...],

@@ -353,6 +353,7 @@ def baseline(
 @app.command()
 def validate(
     windows: int = typer.Option(3, help="Number of non-overlapping windows."),
+    window_months: int = typer.Option(12, help="Length of each window, in months."),
     symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to include."),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
     interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
@@ -360,10 +361,16 @@ def validate(
     """Validate the exploration candidates across non-overlapping history windows."""
     from datetime import date, timedelta
 
+    from app.backtest import execution
     from app.backtest.baselines.models import EXPLORATION_CANDIDATES, BaselineConfig
     from app.backtest.dependencies import load_backtest_history
+    from app.backtest.guard import LookaheadGuard
     from app.backtest.models import BacktestConfig
-    from app.backtest.validation import ValidationReport, ValidationRunner
+    from app.backtest.validation import (
+        ValidationReport,
+        ValidationRunner,
+        check_history,
+    )
     from app.cli.render import render_validation
 
     services = _resolve_services()
@@ -380,7 +387,7 @@ def validate(
     )
 
     async def _run() -> ValidationReport | None:
-        # Pull the maximum history Groww serves, then use all of it.
+        # Pull the maximum history the provider serves, then use all of it.
         wide_end = date.today()
         wide_start = wide_end - timedelta(days=8 * 365)
         try:
@@ -389,36 +396,39 @@ def validate(
             )
         except Exception as exc:  # noqa: BLE001 - best-effort; span check reports it
             logger.warning("Validation history load failed: %s", exc)
+        guard = LookaheadGuard(services.data_engine)
+        spans = await execution.stored_spans(guard, universe, exchange, interval)
+        typer.echo("Confirmed available history (true earliest per symbol):")
+        for name, first, last, count in spans:
+            typer.echo(f"  {name:<12} {first}..{last}  ({count} candles)")
         span = await runner.stored_range(universe)
         if span is None:
+            typer.echo("No stored candles for the universe — cannot validate.")
             return None
-        span_start, span_end = span
-        # Reserve the strategy lookback before the first window.
-        start = span_start + timedelta(days=tuning.history_days)
-        if (span_end - start).days < windows:
-            logger.warning(
-                "Only %s..%s available after the lookback — too little for %d windows.",
-                start,
-                span_end,
-                windows,
-            )
+        check = check_history(
+            span[0],
+            span[1],
+            lookback_days=tuning.history_days,
+            windows=windows,
+            window_months=window_months,
+        )
+        typer.echo(check.message)
+        if not check.ok:
             return None
+        # Use the most recent, confirmed, sufficiently-long span.
+        start = span[1] - timedelta(days=check.required_days)
         return await runner.validate(
             universe,
             EXPLORATION_CANDIDATES,
             start,
-            span_end,
+            span[1],
             window_count=windows,
-            span_start=span_start,
-            span_end=span_end,
+            span_start=span[0],
+            span_end=span[1],
         )
 
     report = asyncio.run(_run())
     if report is None:
-        typer.echo(
-            "Validation could not run: no (or too little) stored history for the "
-            "universe. Load candles first (run an import), then retry."
-        )
         raise typer.Exit(code=1)
     typer.echo(render_validation(report))
 

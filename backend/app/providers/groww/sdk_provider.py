@@ -162,11 +162,34 @@ class GrowwSDKProvider(MarketDataProvider):
             )
 
         payload = await self._call(_run, what="historical candles")
+        candles = _parse_candles(payload)
+        # Instrumentation: log what the SDK actually served for the requested
+        # window, so a provider that returns recent data for an old range (or
+        # empty, or an error) leaves raw evidence in the logs.
+        if candles:
+            logger.info(
+                "Groww SDK historical %s: requested %s..%s, received %d candles "
+                "spanning %s..%s.",
+                trading_symbol,
+                start_date.date(),
+                end_date.date(),
+                len(candles),
+                candles[0].timestamp.date(),
+                candles[-1].timestamp.date(),
+            )
+        else:
+            logger.info(
+                "Groww SDK historical %s: requested %s..%s, received 0 candles "
+                "(provider served no data for this window).",
+                trading_symbol,
+                start_date.date(),
+                end_date.date(),
+            )
         return HistoricalData(
             symbol=trading_symbol,
             exchange=exchange,
             interval=interval,
-            candles=_parse_candles(payload),
+            candles=candles,
         )
 
     async def get_quote(self, symbol: str, exchange: Exchange = Exchange.NSE) -> Quote:

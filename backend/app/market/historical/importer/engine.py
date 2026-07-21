@@ -21,6 +21,7 @@ from app.core.logging import get_logger
 from app.market.calendar.service import MarketCalendarService
 from app.market.enums import Exchange, Interval
 from app.market.historical.engine import HistoricalDataEngine
+from app.market.historical.importer.exceptions import OutOfWindowDataError
 from app.market.historical.importer.models import (
     ImportConfig,
     ImportMode,
@@ -189,6 +190,14 @@ class HistoricalImportEngine:
             if bars is None:
                 continue
 
+            try:
+                self._verify_window(symbol, bars, window_start, window_end)
+            except OutOfWindowDataError as exc:
+                # REJECT the batch: never store or relabel out-of-window data.
+                totals.failed_requests += 1
+                logger.error("%s", exc)
+                continue
+
             totals.candles_downloaded += len(bars.candles)
             await self._store_bars(bars, key, totals)
 
@@ -206,6 +215,35 @@ class HistoricalImportEngine:
                         candles_imported=totals.candles_imported,
                     )
                 )
+
+    @staticmethod
+    def _verify_window(
+        symbol: str,
+        bars: HistoricalData,
+        window_start: datetime,
+        window_end: datetime,
+    ) -> None:
+        """Reject a batch whose candles fall outside the requested window.
+
+        Raises:
+            OutOfWindowDataError: If any returned candle is dated before
+                ``window_start`` or after ``window_end``. A provider that serves
+                the wrong date range is never trusted to relabel it as history.
+        """
+        if not bars.candles:
+            return
+        low, high = window_start.date(), window_end.date()
+        outside = [c for c in bars.candles if not (low <= c.timestamp.date() <= high)]
+        if outside:
+            received_low = min(c.timestamp.date() for c in bars.candles)
+            received_high = max(c.timestamp.date() for c in bars.candles)
+            raise OutOfWindowDataError(
+                f"Out-of-window data for {symbol}: requested {low}..{high} but the "
+                f"provider returned {received_low}..{received_high} "
+                f"({len(outside)}/{len(bars.candles)} candles outside the window). "
+                "Rejecting the batch — recent data must never be relabelled as "
+                "older history."
+            )
 
     async def _store_bars(
         self, bars: HistoricalData, key: SeriesKey, totals: _SummaryAccumulator
