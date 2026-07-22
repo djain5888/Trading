@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -174,6 +174,51 @@ def test_detect_gaps() -> None:
     issues, missing = ValidationEngine().detect_gaps(candles, Interval.ONE_MINUTE)
     assert missing == 1
     assert issues and issues[0].issue_type is IssueType.GAP
+
+
+def _daily(day: date, *, symbol: str = "RELIANCE") -> Candle:
+    """Build a valid daily candle dated ``day``."""
+    return Candle(
+        symbol=symbol,
+        exchange=Exchange.NSE,
+        interval=Interval.ONE_DAY,
+        timestamp=datetime(day.year, day.month, day.day, 9, 15, tzinfo=INDIA_TZ),
+        open=Decimal("100"),
+        high=Decimal("105"),
+        low=Decimal("99"),
+        close=Decimal("101"),
+        volume=1000,
+    )
+
+
+def test_daily_gaps_do_not_count_weekends() -> None:
+    """A Friday->Monday daily series has NO gap: weekends are not sessions.
+
+    This is the TASK-028 fix: the old calendar-day grid counted Sat+Sun as two
+    "missing candles", inflating gaps_found to roughly half the window.
+    """
+    # Fri 2024-01-05, Mon 2024-01-08, Tue 2024-01-09 — contiguous sessions.
+    candles = [
+        _daily(date(2024, 1, 5)),
+        _daily(date(2024, 1, 8)),
+        _daily(date(2024, 1, 9)),
+    ]
+    issues, missing = ValidationEngine().detect_gaps(candles, Interval.ONE_DAY)
+    assert missing == 0
+    assert issues == []
+
+
+def test_daily_gaps_count_missing_weekday_sessions() -> None:
+    """A genuinely skipped weekday (mid-week) is one missing session."""
+    # Mon 2024-01-08 then Thu 2024-01-11 — Tue and Wed sessions are missing.
+    candles = [_daily(date(2024, 1, 8)), _daily(date(2024, 1, 11))]
+    _, missing = ValidationEngine().detect_gaps(candles, Interval.ONE_DAY)
+    assert missing == 2  # Tuesday + Wednesday, not the calendar-day count of 2
+
+    # A single skipped Wednesday counts as exactly one.
+    two = [_daily(date(2024, 1, 9)), _daily(date(2024, 1, 11))]
+    _, one = ValidationEngine().detect_gaps(two, Interval.ONE_DAY)
+    assert one == 1
 
 
 # -- Engine import ---------------------------------------------------------

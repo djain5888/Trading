@@ -7,7 +7,7 @@ fixed grid implied by the interval. The engine is pure and stateless.
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import timedelta
+from datetime import date, timedelta
 
 from app.market.enums import Interval
 from app.market.historical import invariants
@@ -15,6 +15,27 @@ from app.market.historical.enums import IssueType
 from app.market.historical.intervals import interval_delta
 from app.market.historical.models import Candle
 from app.market.historical.report import ValidationIssue
+
+#: Daily intervals live on a *trading-session* grid, not a calendar-day grid:
+#: a candle after Friday's is expected on Monday, so weekends are not gaps.
+_SESSION_GRID_INTERVALS = frozenset({Interval.ONE_DAY})
+
+
+def _weekdays_strictly_between(earlier: date, later: date) -> int:
+    """Count Mon–Fri dates strictly between two dates (weekends excluded).
+
+    This is the count of *expected* trading sessions missing between two
+    consecutive daily candles. It excludes weekends (never sessions); it does
+    not know exchange holidays, so a holiday still reads as one missing session
+    unless a holiday calendar is applied upstream.
+    """
+    missing = 0
+    cursor = earlier + timedelta(days=1)
+    while cursor < later:
+        if cursor.weekday() < 5:  # Mon=0 .. Fri=4
+            missing += 1
+        cursor += timedelta(days=1)
+    return missing
 
 
 class ValidationEngine:
@@ -145,13 +166,20 @@ class ValidationEngine:
         delta = interval_delta(interval)
         if delta is None:
             return [], 0
+        session_grid = interval in _SESSION_GRID_INTERVALS
         issues: list[ValidationIssue] = []
         total_missing = 0
         for previous, current in zip(ordered, ordered[1:], strict=False):
             distance = current.timestamp - previous.timestamp
             if distance <= delta:
                 continue
-            missing = int(distance / delta) - 1
+            if session_grid:
+                # Count only missing weekday sessions, not weekend calendar days.
+                missing = _weekdays_strictly_between(
+                    previous.timestamp.date(), current.timestamp.date()
+                )
+            else:
+                missing = int(distance / delta) - 1
             if missing <= 0:
                 continue
             total_missing += missing

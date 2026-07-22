@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from app.backtest.baselines.models import BaselineResult
+from app.backtest.diagnostics import ReturnCheck
 from app.backtest.models import (
     BacktestReport,
     ExecutionLeakage,
@@ -399,6 +400,51 @@ def _passed_summary(report: ValidationReport) -> str:
     """One-line summary of which strategies passed a validation report."""
     passed = report.passed
     return ", ".join(passed) if passed else "none"
+
+
+def render_returns_diagnosis(symbol: str, checks: Sequence[ReturnCheck]) -> str:
+    """Render the per-window candle/return integrity diagnosis for one symbol."""
+    lines = [f"===== Returns Diagnosis: {symbol} ====="]
+    for check in checks:
+        audit = check.audit
+        lines.append("")
+        lines.append(f"  {check.window_label}")
+        lines.append(
+            f"    candles={audit.candles}  "
+            f"dates {audit.first_date}..{audit.last_date}  "
+            f"missing_sessions={audit.missing_sessions}"
+        )
+        defects = []
+        if audit.duplicate_dates:
+            defects.append(f"duplicates={len(audit.duplicate_dates)}")
+        if audit.out_of_order:
+            defects.append(f"out_of_order={audit.out_of_order}")
+        if audit.out_of_window_dates:
+            defects.append(f"out_of_window={len(audit.out_of_window_dates)}")
+        lines.append(f"    date defects: {', '.join(defects) if defects else 'none'}")
+        hold = audit.hold_return_pct
+        lines.append(
+            f"    first_close={audit.first_close}  last_close={audit.last_close}  "
+            f"hold_return={hold if hold is not None else 'n/a'}%"
+        )
+        if check.engine_return_pct is not None:
+            match = check.matches_engine
+            verdict = "MATCH" if match else "DIVERGES — engine math suspect"
+            lines.append(
+                f"    engine buy_and_hold={check.engine_return_pct:+.2f}%  "
+                f"vs hold={hold if hold is not None else 'n/a'}%  [{verdict}]"
+            )
+        if audit.suspected_adjustments:
+            lines.append(
+                f"    SUSPECTED SPLIT/BONUS (unadjusted prices) — "
+                f"{len(audit.suspected_adjustments)} overnight jump(s):"
+            )
+            for jump in audit.suspected_adjustments:
+                lines.append(
+                    f"      {jump.on}  {jump.prev_close} -> {jump.close}  "
+                    f"({jump.change_pct:+.1f}%)"
+                )
+    return "\n".join(lines)
 
 
 def _render_execution_leakage(leakage: ExecutionLeakage) -> list[str]:

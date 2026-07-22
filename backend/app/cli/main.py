@@ -500,6 +500,94 @@ def validate(
 
 
 @app.command()
+def diagnose(
+    from_: str = typer.Option(..., "--from", help="Window start (YYYY-MM-DD)."),
+    to: str = typer.Option(..., "--to", help="Window end (YYYY-MM-DD)."),
+    windows: int = typer.Option(1, help="Split the range into N contiguous windows."),
+    symbol: list[str] = typer.Option(
+        [], "--symbol", "-s", help="Symbols to audit (default: RELIANCE, NIFTY)."
+    ),
+    jump_threshold: float = typer.Option(
+        25.0, help="Overnight %% move flagged as a suspected split/bonus."
+    ),
+    exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
+    interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
+) -> None:
+    """Audit stored candles and the buy_and_hold return math (data integrity)."""
+    from datetime import date, datetime
+
+    from app.backtest.baselines.dependencies import build_baseline_engine
+    from app.backtest.baselines.models import BaselineName
+    from app.backtest.dependencies import load_backtest_history
+    from app.backtest.diagnostics import ReturnCheck, audit_candles
+    from app.backtest.models import BacktestConfig
+    from app.backtest.validation import split_windows
+    from app.cli.render import render_returns_diagnosis
+    from app.core.timezone import INDIA_TZ
+    from app.market.historical.models import SeriesKey
+
+    services = _resolve_services()
+    configure_logging(services.settings)
+    symbols = list(symbol) if symbol else ["RELIANCE", "NIFTY"]
+    config = BacktestConfig(exchange=exchange, interval=interval)
+    start, end = date.fromisoformat(from_), date.fromisoformat(to)
+    windows_spec = split_windows(start, end, windows)
+
+    async def _run() -> dict[str, list[ReturnCheck]]:
+        try:
+            await load_backtest_history(services, symbols, start, end, config)
+        except Exception as exc:  # noqa: BLE001 - best-effort; the audit reports gaps
+            logger.warning("Diagnose history load failed: %s", exc)
+        results: dict[str, list[ReturnCheck]] = {}
+        for name in symbols:
+            key = SeriesKey(symbol=name, exchange=exchange, interval=interval)
+            checks: list[ReturnCheck] = []
+            for window in windows_spec:
+                lo = datetime(
+                    window.start.year,
+                    window.start.month,
+                    window.start.day,
+                    tzinfo=INDIA_TZ,
+                )
+                hi = datetime(
+                    window.end.year,
+                    window.end.month,
+                    window.end.day,
+                    23,
+                    59,
+                    59,
+                    tzinfo=INDIA_TZ,
+                )
+                candles = await services.data_engine.get_candles(key, lo, hi)
+                audit = audit_candles(
+                    name,
+                    candles,
+                    window.start,
+                    window.end,
+                    interval=interval,
+                    jump_threshold_pct=jump_threshold,
+                )
+                engine = build_baseline_engine(
+                    services, BaselineName.BUY_AND_HOLD, config=config
+                )
+                report = await engine.run([name], window.start, window.end)
+                checks.append(
+                    ReturnCheck(
+                        window_label=window.label,
+                        audit=audit,
+                        engine_return_pct=report.total_return_pct,
+                    )
+                )
+            results[name] = checks
+        return results
+
+    results = asyncio.run(_run())
+    for name, checks in results.items():
+        typer.echo(render_returns_diagnosis(name, checks))
+        typer.echo("")
+
+
+@app.command()
 def serve() -> None:
     """Start the FastAPI server (Uvicorn)."""
     from app.main import run as run_server
