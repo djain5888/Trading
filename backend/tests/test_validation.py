@@ -14,6 +14,8 @@ from app.backtest.validation import (
     ValidationRunner,
     build_verdict,
     check_history,
+    limit_by_tier,
+    partition_by_tier,
     split_windows,
 )
 from app.core.clock import FakeClock
@@ -246,3 +248,84 @@ async def test_runner_flags_thin_windows_not_evaluable() -> None:
     verdict = report.verdicts[0]
     assert "NOT EVALUABLE" in verdict.note
     assert report.passed == ()  # nothing passes on this thin data
+
+
+# -- Tier segmentation and the tiered matrix -------------------------------
+
+
+def test_partition_and_limit_are_tier_balanced() -> None:
+    """The tier helpers group by cap tier and truncate in a balanced way."""
+    symbols = ["A", "B", "C", "D"]
+    tiers = {"A": "large", "B": "small", "C": "large", "D": "mid"}
+
+    groups = partition_by_tier(symbols, tiers)
+    assert groups == {"large": ["A", "C"], "mid": ["D"], "small": ["B"]}
+
+    limited = limit_by_tier(symbols, tiers, 2)
+    assert len(limited) == 2
+    # Round-robin picks one large then one mid before a second large.
+    assert set(limited) == {"A", "D"}
+
+
+async def test_validate_tiers_splits_the_matrix_by_tier() -> None:
+    """Tiered validation yields an overall report plus one report per cap tier."""
+    cal = _calendar()
+    days: list[date] = []
+    day = date(2022, 1, 1)
+    while len(days) < 400:
+        if cal.is_trading_day(day, Exchange.NSE):
+            days.append(day)
+        day += timedelta(days=1)
+    data = HistoricalDataEngine(InMemoryCandleRepository(), ValidationEngine())
+    universe = ["AAA", "BBB", "CCC", "DDD"]
+    tiers = {"AAA": "large", "BBB": "large", "CCC": "mid", "DDD": "small"}
+    for i, symbol in enumerate((*universe, "NIFTY")):
+        await _seed(data, symbol, days, [100.0 + i * 5 + j * 0.5 for j in range(400)])
+
+    tuning = BaselineConfig(top_n=1, history_days=120, trend_ema=20, atr_period=5)
+    runner = ValidationRunner(
+        data_engine=data,
+        indicators=IndicatorEngine(
+            data, FakeClock(datetime(2026, 7, 16, tzinfo=_TZ)), get_indicator_registry()
+        ),
+        calendar=cal,
+        config=BacktestConfig(),
+        baseline_config=tuning,
+    )
+    span = await runner.stored_range(universe)
+    assert span is not None
+    start = span[0] + timedelta(days=tuning.history_days)
+
+    tiered = await runner.validate_tiers(
+        universe,
+        [BaselineName.TREND_FOLLOW],
+        start,
+        span[1],
+        window_count=3,
+        tiers=tiers,
+    )
+
+    # Overall spans the whole universe; three tiers appear, largest first.
+    assert tiered.universe_size == 4
+    assert tiered.symbols == tuple(universe)
+    assert [t.tier for t in tiered.tiers] == ["large", "mid", "small"]
+    assert tiered.tiers[0].symbols == ("AAA", "BBB")
+    assert tiered.tiers[1].symbols == ("CCC",)
+    assert tiered.tiers[2].symbols == ("DDD",)
+
+    # Matrix correctness: the large-tier report reproduces a stand-alone run
+    # over exactly the large-tier symbols and the same windows.
+    large = tiered.tiers[0]
+    standalone = await runner.validate(
+        ["AAA", "BBB"],
+        [BaselineName.TREND_FOLLOW],
+        start,
+        span[1],
+        window_count=3,
+    )
+    assert [c.model_dump() for c in large.report.cells] == [
+        c.model_dump() for c in standalone.cells
+    ]
+    # Every tier shares the identical window layout with the overall run.
+    for tier in tiered.tiers:
+        assert tier.report.windows == tiered.overall.windows

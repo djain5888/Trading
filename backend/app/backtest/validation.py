@@ -21,6 +21,7 @@ from app.backtest.baselines.engine import BaselineEngine
 from app.backtest.baselines.models import BaselineConfig, BaselineName
 from app.backtest.guard import LookaheadGuard
 from app.backtest.models import BacktestConfig, BacktestReport
+from app.config.watchlist import CAP_TIERS
 from app.indicators.engine import IndicatorEngine
 from app.market.calendar.service import MarketCalendarService
 from app.market.historical.engine import HistoricalDataEngine
@@ -176,6 +177,76 @@ def split_windows(start: date, end: date, count: int) -> list[WindowSpec]:
     return windows
 
 
+def partition_by_tier(
+    symbols: Sequence[str], tiers: dict[str, str]
+) -> dict[str, list[str]]:
+    """Group ``symbols`` by their market-cap tier, preserving order.
+
+    Symbols with no known tier are dropped. The returned mapping is ordered with
+    the recognised tiers (:data:`CAP_TIERS`) first, then any extra tiers seen.
+    """
+    groups: dict[str, list[str]] = {}
+    for symbol in symbols:
+        tier = tiers.get(symbol, "").strip().lower()
+        if tier:
+            groups.setdefault(tier, []).append(symbol)
+    ordered: dict[str, list[str]] = {t: groups[t] for t in CAP_TIERS if t in groups}
+    for tier, members in groups.items():
+        if tier not in ordered:
+            ordered[tier] = members
+    return ordered
+
+
+def limit_by_tier(
+    symbols: Sequence[str], tiers: dict[str, str], limit: int
+) -> list[str]:
+    """Truncate ``symbols`` to at most ``limit``, balanced across tiers.
+
+    Selection is round-robin across the tiers so each cap tier keeps roughly the
+    same representation. Original order is preserved in the returned list. Any
+    untiered symbols backfill only once every tier is exhausted.
+    """
+    if limit <= 0:
+        return []
+    if len(symbols) <= limit:
+        return list(symbols)
+    groups = partition_by_tier(symbols, tiers)
+    queues = {tier: list(members) for tier, members in groups.items()}
+    chosen: set[str] = set()
+    while len(chosen) < limit and any(queues.values()):
+        for queue in queues.values():
+            if queue and len(chosen) < limit:
+                chosen.add(queue.pop(0))
+    if len(chosen) < limit:
+        for symbol in symbols:
+            if symbol not in chosen:
+                chosen.add(symbol)
+                if len(chosen) >= limit:
+                    break
+    return [symbol for symbol in symbols if symbol in chosen]
+
+
+class TierValidation(BaseModel):
+    """One market-cap tier's sub-universe and its validation report."""
+
+    model_config = ConfigDict(frozen=True)
+
+    tier: str = Field(description="Market-cap tier label (large/mid/small).")
+    symbols: tuple[str, ...] = Field(description="Symbols in this tier.")
+    report: ValidationReport = Field(description="Validation over this tier only.")
+
+
+class TieredValidationReport(BaseModel):
+    """The overall validation plus per-tier breakdowns over the same windows."""
+
+    model_config = ConfigDict(frozen=True)
+
+    universe_size: int = Field(ge=0, description="Total symbols in the universe.")
+    symbols: tuple[str, ...] = Field(description="The full validated universe.")
+    overall: ValidationReport = Field(description="Validation over all symbols.")
+    tiers: tuple[TierValidation, ...] = Field(description="Per-tier validations.")
+
+
 class ValidationRunner:
     """Runs a set of strategies over non-overlapping windows with a benchmark."""
 
@@ -278,6 +349,58 @@ class ValidationRunner:
             windows=tuple(windows),
             cells=tuple(cells),
             verdicts=verdicts,
+        )
+
+    async def validate_tiers(
+        self,
+        symbols: Sequence[str],
+        strategies: Sequence[BaselineName],
+        start: date,
+        end: date,
+        *,
+        window_count: int,
+        tiers: dict[str, str],
+        span_start: date | None = None,
+        span_end: date | None = None,
+    ) -> TieredValidationReport:
+        """Validate the whole universe, then each cap tier over the same windows.
+
+        The overall run and every per-tier run share the identical ``[start,
+        end]`` windows and benchmark, so each tier is compared to its own
+        buy-and-hold — making tier-level edge directly comparable.
+        """
+        overall = await self.validate(
+            symbols,
+            strategies,
+            start,
+            end,
+            window_count=window_count,
+            span_start=span_start,
+            span_end=span_end,
+        )
+        groups = partition_by_tier(symbols, tiers)
+        tier_results: list[TierValidation] = []
+        for tier in CAP_TIERS:
+            members = groups.get(tier)
+            if not members:
+                continue
+            report = await self.validate(
+                members,
+                strategies,
+                start,
+                end,
+                window_count=window_count,
+                span_start=span_start,
+                span_end=span_end,
+            )
+            tier_results.append(
+                TierValidation(tier=tier, symbols=tuple(members), report=report)
+            )
+        return TieredValidationReport(
+            universe_size=len(symbols),
+            symbols=tuple(symbols),
+            overall=overall,
+            tiers=tuple(tier_results),
         )
 
 

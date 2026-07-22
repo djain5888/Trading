@@ -15,7 +15,7 @@ from app.backtest.models import (
     ExitAnalysis,
     ExitBreakdown,
 )
-from app.backtest.validation import ValidationReport
+from app.backtest.validation import TieredValidationReport, ValidationReport
 from app.market.regime.models import RegimeReport
 from app.market.relative.models import RSReport
 from app.market.sector.models import SectorReport
@@ -349,6 +349,42 @@ def render_validation(report: ValidationReport) -> str:
         + (", ".join(passed) if passed else "none — no strategy beat the majority test")
     )
     return "\n".join(lines)
+
+
+def render_tiered_validation(report: TieredValidationReport) -> str:
+    """Render the overall validation, each cap tier, and a per-tier verdict grid."""
+    lines = [
+        "===== Titan Wide-Universe Validation =====",
+        f"Universe:          {report.universe_size} symbols across "
+        f"{len(report.tiers)} cap tier(s)",
+        "",
+        "----- OVERALL (all tiers) -----",
+        render_validation(report.overall),
+    ]
+    for tier in report.tiers:
+        lines.append("")
+        lines.append(
+            f"----- {tier.tier.upper()} CAP ({len(tier.symbols)} symbols) -----"
+        )
+        lines.append(render_validation(tier.report))
+
+    lines.extend(["", "===== Tier Summary: strategies that beat buy_and_hold ====="])
+    lines.append(f"  {'OVERALL':<10} {_passed_summary(report.overall)}")
+    for tier in report.tiers:
+        lines.append(f"  {tier.tier.upper():<10} {_passed_summary(tier.report)}")
+    winning = [tier.tier for tier in report.tiers if tier.report.passed]
+    lines.append("")
+    lines.append(
+        "Tier(s) with an edge: "
+        + (", ".join(winning) if winning else "none — no tier beat buy_and_hold")
+    )
+    return "\n".join(lines)
+
+
+def _passed_summary(report: ValidationReport) -> str:
+    """One-line summary of which strategies passed a validation report."""
+    passed = report.passed
+    return ", ".join(passed) if passed else "none"
 
 
 def _render_execution_leakage(leakage: ExecutionLeakage) -> list[str]:

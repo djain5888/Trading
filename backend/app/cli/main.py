@@ -355,6 +355,16 @@ def validate(
     windows: int = typer.Option(3, help="Number of non-overlapping windows."),
     window_months: int = typer.Option(12, help="Length of each window, in months."),
     symbol: list[str] = typer.Option([], "--symbol", "-s", help="Symbol to include."),
+    wide: bool = typer.Option(
+        False,
+        "--wide",
+        help="Use the bundled wide NSE universe and report a per-cap-tier split.",
+    ),
+    symbols_limit: int = typer.Option(
+        0,
+        "--symbols-limit",
+        help="Cap the universe to N symbols (balanced across tiers); 0 = no cap.",
+    ),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
     interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
 ) -> None:
@@ -367,15 +377,31 @@ def validate(
     from app.backtest.guard import LookaheadGuard
     from app.backtest.models import BacktestConfig
     from app.backtest.validation import (
+        TieredValidationReport,
         ValidationReport,
         ValidationRunner,
         check_history,
+        limit_by_tier,
     )
-    from app.cli.render import render_validation
+    from app.cli.render import render_tiered_validation, render_validation
+    from app.config.watchlist import load_wide_universe
 
     services = _resolve_services()
     configure_logging(services.settings)
-    universe = list(_watchlist(symbol))
+    if wide:
+        watchlist = load_wide_universe()
+        tiers = dict(watchlist.tiers)
+        universe = list(watchlist.symbols)
+    else:
+        tiers = {}
+        universe = list(_watchlist(symbol))
+    if symbols_limit > 0:
+        universe = (
+            limit_by_tier(universe, tiers, symbols_limit)
+            if tiers
+            else universe[:symbols_limit]
+        )
+    typer.echo(f"Universe: {len(universe)} symbol(s){' [wide]' if wide else ''}")
     config = BacktestConfig(exchange=exchange, interval=interval)
     tuning = BaselineConfig()
     runner = ValidationRunner(
@@ -386,7 +412,7 @@ def validate(
         baseline_config=tuning,
     )
 
-    async def _run() -> ValidationReport | None:
+    async def _run() -> ValidationReport | TieredValidationReport | None:
         # Pull the maximum history the provider serves, then use all of it.
         wide_end = date.today()
         wide_start = wide_end - timedelta(days=8 * 365)
@@ -417,6 +443,17 @@ def validate(
             return None
         # Use the most recent, confirmed, sufficiently-long span.
         start = span[1] - timedelta(days=check.required_days)
+        if wide:
+            return await runner.validate_tiers(
+                universe,
+                EXPLORATION_CANDIDATES,
+                start,
+                span[1],
+                window_count=windows,
+                tiers=tiers,
+                span_start=span[0],
+                span_end=span[1],
+            )
         return await runner.validate(
             universe,
             EXPLORATION_CANDIDATES,
@@ -430,7 +467,10 @@ def validate(
     report = asyncio.run(_run())
     if report is None:
         raise typer.Exit(code=1)
-    typer.echo(render_validation(report))
+    if isinstance(report, TieredValidationReport):
+        typer.echo(render_tiered_validation(report))
+    else:
+        typer.echo(render_validation(report))
 
 
 @app.command()

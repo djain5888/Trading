@@ -38,6 +38,15 @@ _DEFAULT_SECTORS: dict[str, str] = {
     "TATAMOTORS": "AUTO",
 }
 
+#: The default watchlist is all large caps.
+_DEFAULT_TIERS: dict[str, str] = {symbol: "large" for symbol in _DEFAULT_SECTORS}
+
+#: The recognised market-cap tiers, largest first.
+CAP_TIERS: tuple[str, ...] = ("large", "mid", "small")
+
+#: A bundled ~60-symbol NSE universe (large/mid/small) for wide validation.
+WIDE_UNIVERSE_FILE = Path(__file__).with_name("universe_wide.json")
+
 
 class WatchlistConfig(BaseModel):
     """The default universe: index benchmark, watchlist and sector map."""
@@ -53,6 +62,10 @@ class WatchlistConfig(BaseModel):
     sectors: dict[str, str] = Field(
         default_factory=lambda: dict(_DEFAULT_SECTORS),
         description="Symbol -> sector metadata.",
+    )
+    tiers: dict[str, str] = Field(
+        default_factory=lambda: dict(_DEFAULT_TIERS),
+        description="Symbol -> market-cap tier (large/mid/small).",
     )
 
     @field_validator("index_symbol", mode="before")
@@ -91,6 +104,18 @@ class WatchlistConfig(BaseModel):
             if str(key).strip() and str(sector).strip()
         }
 
+    @field_validator("tiers", mode="before")
+    @classmethod
+    def _normalise_tiers(cls, value: object) -> dict[str, str]:
+        """Upper-case symbol keys and lower-case tier labels."""
+        if not isinstance(value, dict):
+            raise ValueError("tiers must be a mapping of symbol -> tier.")
+        return {
+            str(key).strip().upper(): str(tier).strip().lower()
+            for key, tier in value.items()
+            if str(key).strip() and str(tier).strip()
+        }
+
 
 def load_watchlist(path: Path | None = None) -> WatchlistConfig:
     """Load the watchlist, falling back to the seeded defaults.
@@ -119,6 +144,17 @@ def load_watchlist(path: Path | None = None) -> WatchlistConfig:
     except ValidationError as exc:
         logger.warning("Invalid watchlist file %s: %s; using defaults.", path, exc)
         return WatchlistConfig()
+
+
+def load_wide_universe() -> WatchlistConfig:
+    """Load the bundled wide NSE universe (large/mid/small caps) for validation.
+
+    Returns:
+        The :class:`WatchlistConfig` parsed from ``universe_wide.json``. If the
+        bundled file is missing or invalid the built-in defaults are returned
+        (mirroring :func:`load_watchlist`).
+    """
+    return load_watchlist(WIDE_UNIVERSE_FILE)
 
 
 @lru_cache(maxsize=1)
