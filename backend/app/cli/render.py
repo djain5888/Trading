@@ -313,11 +313,18 @@ def render_validation(report: ValidationReport) -> str:
         f"min trades/window: {report.min_trades}",
         "",
     ]
+    elig_by_window = {e.window: e for e in report.eligibility}
     for window in report.windows:
         bench = next(
             c.benchmark_return_pct for c in report.cells if c.window == window.index
         )
-        lines.append(f"  {window.label}   benchmark {bench:+.2f}%")
+        elig = elig_by_window.get(window.index)
+        suffix = ""
+        if elig is not None:
+            suffix = f"   eligible {elig.eligible_count}"
+            if elig.excluded:
+                suffix += f", excluded {len(elig.excluded)}: {', '.join(elig.excluded)}"
+        lines.append(f"  {window.label}   benchmark {bench:+.2f}%{suffix}")
 
     header = f"{'strategy':<20}" + "".join(
         f"{w.label.split()[0]:>16}" for w in report.windows
@@ -348,6 +355,13 @@ def render_validation(report: ValidationReport) -> str:
         "PASSED (edge in the majority of windows): "
         + (", ".join(passed) if passed else "none — no strategy beat the majority test")
     )
+    if any(e.excluded for e in report.eligibility):
+        lines.append("")
+        lines.append(
+            "Survivorship note: late-IPO symbols excluded per-window REDUCE but do "
+            "NOT eliminate survivorship bias — the universe is still today's listed "
+            "names; delisted/failed companies are absent."
+        )
     return "\n".join(lines)
 
 

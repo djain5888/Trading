@@ -12,9 +12,13 @@ from app.backtest.models import BacktestConfig
 from app.backtest.validation import (
     ValidationCell,
     ValidationRunner,
+    WindowSpec,
     build_verdict,
     check_history,
+    eligible_for_window,
     limit_by_tier,
+    longest_span,
+    majority_span,
     partition_by_tier,
     split_windows,
 )
@@ -87,6 +91,88 @@ def test_check_history_accepts_sufficient_history() -> None:
 
     assert check.ok is True
     assert check.usable_days >= check.required_days
+
+
+# -- Per-window eligibility and the majority span (TASK-027) ---------------
+
+
+def _span(symbol: str, first: date, last: date) -> tuple[str, date, date, int]:
+    """Build a stored-span tuple as :func:`execution.stored_spans` returns it."""
+    return (symbol, first, last, (last - first).days)
+
+
+def test_majority_span_ignores_a_single_late_ipo() -> None:
+    """One 2022-IPO symbol must not collapse a span most symbols support."""
+    spans = [
+        _span("A", date(2017, 1, 1), date(2025, 1, 1)),
+        _span("B", date(2017, 6, 1), date(2025, 1, 1)),
+        _span("C", date(2017, 3, 1), date(2025, 1, 1)),
+        _span("D", date(2022, 11, 1), date(2025, 1, 1)),  # late IPO
+        _span("E", date(2017, 2, 1), date(2025, 1, 1)),
+    ]
+
+    majority = majority_span(spans)
+    longest = longest_span(spans)
+
+    assert majority is not None and longest is not None
+    # Majority start is a 2017 date — the late IPO does not drag it to 2022.
+    assert majority[0].year == 2017
+    # Longest span reaches back to the earliest first-date of any symbol.
+    assert longest[0] == date(2017, 1, 1)
+    assert longest[1] == date(2025, 1, 1)
+
+
+def test_span_helpers_handle_empty() -> None:
+    """Both span helpers return None for an empty universe."""
+    assert majority_span([]) is None
+    assert longest_span([]) is None
+
+
+def test_eligible_for_window_excludes_late_ipo_from_early_window_only() -> None:
+    """A symbol that IPO'd mid-history is excluded only from windows it precedes."""
+    spans = {
+        "OLD": (date(2017, 1, 1), date(2025, 1, 1)),
+        "IPO": (date(2022, 6, 1), date(2025, 1, 1)),
+    }
+    early = WindowSpec(
+        index=0, start=date(2020, 1, 1), end=date(2020, 12, 31), label="W1"
+    )
+    late = WindowSpec(
+        index=1, start=date(2024, 1, 1), end=date(2024, 12, 31), label="W2"
+    )
+
+    early_ok, early_out = eligible_for_window(["OLD", "IPO"], spans, early, 420)
+    late_ok, late_out = eligible_for_window(["OLD", "IPO"], spans, late, 420)
+
+    assert early_ok == ["OLD"] and early_out == ["IPO"]  # IPO too young for W1
+    assert late_ok == ["OLD", "IPO"] and late_out == []  # both cover W2 + lookback
+
+
+def test_eligible_for_window_requires_the_full_lookback() -> None:
+    """A symbol whose data starts inside the lookback window is excluded."""
+    spans = {"X": (date(2020, 1, 1), date(2025, 1, 1))}
+    # Window starts only 100 days after X's first candle — lookback of 420 unmet.
+    window = WindowSpec(
+        index=0, start=date(2020, 4, 10), end=date(2020, 12, 31), label="W"
+    )
+
+    usable, dropped = eligible_for_window(["X"], spans, window, 420)
+
+    assert usable == [] and dropped == ["X"]
+
+
+def test_check_history_refuses_when_even_longest_is_insufficient() -> None:
+    """The refuse backstop: the widest span still cannot cover the request."""
+    # ~2 years total, far short of 3 x 12-month windows after a 420-day lookback.
+    check = check_history(
+        date(2023, 1, 1),
+        date(2025, 1, 1),
+        lookback_days=420,
+        windows=3,
+        window_months=12,
+    )
+
+    assert check.ok is False
 
 
 # -- The <30-trade guard and the majority verdict --------------------------
@@ -329,3 +415,56 @@ async def test_validate_tiers_splits_the_matrix_by_tier() -> None:
     # Every tier shares the identical window layout with the overall run.
     for tier in tiered.tiers:
         assert tier.report.windows == tiered.overall.windows
+
+
+async def test_validate_excludes_late_ipo_per_window() -> None:
+    """A late-IPO symbol is dropped from early windows but used once eligible."""
+    cal = _calendar()
+    days: list[date] = []
+    day = date(2022, 1, 1)
+    while len(days) < 400:
+        if cal.is_trading_day(day, Exchange.NSE):
+            days.append(day)
+        day += timedelta(days=1)
+    data = HistoricalDataEngine(InMemoryCandleRepository(), ValidationEngine())
+    universe = ["OLD", "IPO", "NIFTY"]
+    for i, symbol in enumerate(universe):
+        await _seed(data, symbol, days, [100.0 + i * 5 + j * 0.5 for j in range(400)])
+
+    tuning = BaselineConfig(top_n=1, history_days=60, trend_ema=20, atr_period=5)
+    runner = ValidationRunner(
+        data_engine=data,
+        indicators=IndicatorEngine(
+            data, FakeClock(datetime(2026, 7, 16, tzinfo=_TZ)), get_indicator_registry()
+        ),
+        calendar=cal,
+        config=BacktestConfig(),
+        baseline_config=tuning,
+    )
+    span = await runner.stored_range(["OLD"])
+    assert span is not None
+    start = span[0] + timedelta(days=tuning.history_days)
+    windows = split_windows(start, span[1], 3)
+    # IPO's history begins inside the second window, so it's ineligible for W1/W2
+    # (its data cannot cover their start minus the lookback) but eligible for W3.
+    ipo_first = windows[2].start - timedelta(days=tuning.history_days)
+    symbol_spans = {
+        "OLD": (span[0], span[1]),
+        "IPO": (ipo_first, span[1]),
+    }
+
+    report = await runner.validate(
+        ["OLD", "IPO"],
+        [BaselineName.TREND_FOLLOW],
+        start,
+        span[1],
+        window_count=3,
+        symbol_spans=symbol_spans,
+    )
+
+    elig = {e.window: e for e in report.eligibility}
+    assert elig[0].excluded == ("IPO",) and elig[0].eligible == ("OLD",)
+    assert elig[1].excluded == ("IPO",)
+    assert "IPO" in elig[2].eligible  # eligible once its history covers the window
+    # The run was NOT refused just because one symbol lacked full history.
+    assert len(report.windows) == 3

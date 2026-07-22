@@ -100,6 +100,24 @@ class WindowSpec(BaseModel):
     label: str = Field(description="Human-readable window label.")
 
 
+class WindowEligibility(BaseModel):
+    """Which symbols had sufficient history for one window, and which did not."""
+
+    model_config = ConfigDict(frozen=True)
+
+    window: int = Field(ge=0, description="Window index.")
+    label: str = Field(description="Human-readable window label.")
+    eligible: tuple[str, ...] = Field(description="Symbols with enough history.")
+    excluded: tuple[str, ...] = Field(
+        description="Symbols excluded (IPO'd late / insufficient history)."
+    )
+
+    @property
+    def eligible_count(self) -> int:
+        """Return the number of eligible symbols for this window."""
+        return len(self.eligible)
+
+
 class ValidationCell(BaseModel):
     """One strategy's result in one window, versus the benchmark."""
 
@@ -143,6 +161,9 @@ class ValidationReport(BaseModel):
     windows: tuple[WindowSpec, ...] = Field(description="The validation windows.")
     cells: tuple[ValidationCell, ...] = Field(description="Strategy x window results.")
     verdicts: tuple[StrategyVerdict, ...] = Field(description="Per-strategy verdicts.")
+    eligibility: tuple[WindowEligibility, ...] = Field(
+        default=(), description="Per-window symbol eligibility (late-IPO exclusions)."
+    )
 
     @property
     def passed(self) -> tuple[str, ...]:
@@ -175,6 +196,62 @@ def split_windows(start: date, end: date, count: int) -> list[WindowSpec]:
             )
         )
     return windows
+
+
+#: A per-symbol stored span as returned by :func:`execution.stored_spans`.
+SymbolSpan = tuple[str, date, date, int]
+
+
+def majority_span(spans: Sequence[SymbolSpan]) -> tuple[date, date] | None:
+    """Return the date span a *majority* of symbols support, or ``None``.
+
+    Unlike the strict intersection (which a single late-IPO symbol collapses),
+    this takes the median first-date and median last-date: at least half the
+    symbols have data covering ``[start, end]``. This is the span to lay windows
+    over — late-IPO symbols are excluded per-window, not from the whole run.
+    """
+    if not spans:
+        return None
+    firsts = sorted(span[1] for span in spans)
+    lasts = sorted(span[2] for span in spans)
+    count = len(spans)
+    # start: a majority start on or before the median first-date.
+    start = firsts[count // 2]
+    # end: a majority have data through at least this date.
+    end = lasts[(count - 1) // 2]
+    return start, end
+
+
+def longest_span(spans: Sequence[SymbolSpan]) -> tuple[date, date] | None:
+    """Return the widest span any single symbol offers (earliest..latest)."""
+    if not spans:
+        return None
+    return min(span[1] for span in spans), max(span[2] for span in spans)
+
+
+def eligible_for_window(
+    symbols: Sequence[str],
+    spans: dict[str, tuple[date, date]],
+    window: WindowSpec,
+    lookback_days: int,
+) -> tuple[list[str], list[str]]:
+    """Split ``symbols`` into (eligible, excluded) for one window.
+
+    A symbol is eligible only if its stored history covers
+    ``[window.start - lookback_days, window.end]`` — so the strategy has its full
+    warm-up before the window and data through the window's end. Symbols that
+    IPO'd after that point are excluded from *this* window only.
+    """
+    need_from = window.start - timedelta(days=lookback_days)
+    eligible: list[str] = []
+    excluded: list[str] = []
+    for symbol in symbols:
+        span = spans.get(symbol)
+        if span is None or span[0] > need_from or span[1] < window.end:
+            excluded.append(symbol)
+        else:
+            eligible.append(symbol)
+    return eligible, excluded
 
 
 def partition_by_tier(
@@ -301,35 +378,74 @@ class ValidationRunner:
         end: date,
         *,
         window_count: int,
+        symbol_spans: dict[str, tuple[date, date]] | None = None,
         span_start: date | None = None,
         span_end: date | None = None,
     ) -> ValidationReport:
-        """Build the strategy-by-window matrix and the majority-test verdicts."""
+        """Build the strategy-by-window matrix and the majority-test verdicts.
+
+        When ``symbol_spans`` is supplied, each window uses only the symbols with
+        sufficient history for *that* window (see :func:`eligible_for_window`):
+        late-IPO symbols are excluded from early windows rather than from the
+        whole run. With ``symbol_spans`` omitted, every symbol is used in every
+        window (the original behaviour).
+        """
         windows = split_windows(start, end, window_count)
+        lookback = self._baseline_config.history_days
+        eligibility: list[WindowEligibility] = []
+        window_symbols: dict[int, list[str]] = {}
+        for window in windows:
+            if symbol_spans is None:
+                usable, dropped = list(symbols), list[str]()
+            else:
+                usable, dropped = eligible_for_window(
+                    symbols, symbol_spans, window, lookback
+                )
+            window_symbols[window.index] = usable
+            eligibility.append(
+                WindowEligibility(
+                    window=window.index,
+                    label=window.label,
+                    eligible=tuple(usable),
+                    excluded=tuple(dropped),
+                )
+            )
+
         benchmark: dict[int, float] = {}
         for window in windows:
+            usable = window_symbols[window.index]
+            if not usable:
+                benchmark[window.index] = 0.0
+                continue
             report = await self._run_one(
-                self._benchmark, symbols, window.start, window.end
+                self._benchmark, usable, window.start, window.end
             )
             benchmark[window.index] = report.total_return_pct
 
         cells: list[ValidationCell] = []
         for name in strategies:
             for window in windows:
-                report = await self._run_one(name, symbols, window.start, window.end)
-                evaluable = report.trades >= self._min_trades
-                beats = evaluable and (
-                    report.total_return_pct > benchmark[window.index]
+                usable = window_symbols[window.index]
+                run = (
+                    await self._run_one(name, usable, window.start, window.end)
+                    if usable
+                    else None
                 )
+                trades = run.trades if run is not None else 0
+                evaluable = trades >= self._min_trades
+                total_return = run.total_return_pct if run is not None else 0.0
+                beats = evaluable and (total_return > benchmark[window.index])
                 cells.append(
                     ValidationCell(
                         strategy=name.value,
                         window=window.index,
-                        trades=report.trades,
-                        expectancy_r=report.expectancy_r,
-                        total_return_pct=report.total_return_pct,
+                        trades=trades,
+                        expectancy_r=run.expectancy_r if run is not None else 0.0,
+                        total_return_pct=total_return,
                         benchmark_return_pct=benchmark[window.index],
-                        max_drawdown_pct=report.max_drawdown_pct,
+                        max_drawdown_pct=(
+                            run.max_drawdown_pct if run is not None else 0.0
+                        ),
                         evaluable=evaluable,
                         beats_benchmark=beats,
                     )
@@ -349,6 +465,7 @@ class ValidationRunner:
             windows=tuple(windows),
             cells=tuple(cells),
             verdicts=verdicts,
+            eligibility=tuple(eligibility),
         )
 
     async def validate_tiers(
@@ -360,6 +477,7 @@ class ValidationRunner:
         *,
         window_count: int,
         tiers: dict[str, str],
+        symbol_spans: dict[str, tuple[date, date]] | None = None,
         span_start: date | None = None,
         span_end: date | None = None,
     ) -> TieredValidationReport:
@@ -367,7 +485,8 @@ class ValidationRunner:
 
         The overall run and every per-tier run share the identical ``[start,
         end]`` windows and benchmark, so each tier is compared to its own
-        buy-and-hold — making tier-level edge directly comparable.
+        buy-and-hold — making tier-level edge directly comparable. Per-window
+        eligibility (``symbol_spans``) applies within each tier too.
         """
         overall = await self.validate(
             symbols,
@@ -375,6 +494,7 @@ class ValidationRunner:
             start,
             end,
             window_count=window_count,
+            symbol_spans=symbol_spans,
             span_start=span_start,
             span_end=span_end,
         )
@@ -390,6 +510,7 @@ class ValidationRunner:
                 start,
                 end,
                 window_count=window_count,
+                symbol_spans=symbol_spans,
                 span_start=span_start,
                 span_end=span_end,
             )

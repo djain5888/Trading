@@ -382,6 +382,8 @@ def validate(
         ValidationRunner,
         check_history,
         limit_by_tier,
+        longest_span,
+        majority_span,
     )
     from app.cli.render import render_tiered_validation, render_validation
     from app.config.watchlist import load_wide_universe
@@ -427,41 +429,65 @@ def validate(
         typer.echo("Confirmed available history (true earliest per symbol):")
         for name, first, last, count in spans:
             typer.echo(f"  {name:<12} {first}..{last}  ({count} candles)")
-        span = await runner.stored_range(universe)
-        if span is None:
+        if not spans:
             typer.echo("No stored candles for the universe — cannot validate.")
             return None
-        check = check_history(
-            span[0],
-            span[1],
-            lookback_days=tuning.history_days,
-            windows=windows,
-            window_months=window_months,
+
+        # Per-window eligibility (TASK-027): lay windows over the span a MAJORITY
+        # of symbols support, not the single shortest one, and refuse only if
+        # even the longest-history symbol cannot cover the request.
+        symbol_spans = {name: (first, last) for name, first, last, _ in spans}
+        majority = majority_span(spans)
+        longest = longest_span(spans)
+        assert majority is not None and longest is not None  # spans is non-empty
+        typer.echo(
+            f"Available history — majority span {majority[0]}..{majority[1]}, "
+            f"longest span {longest[0]}..{longest[1]}."
         )
-        typer.echo(check.message)
-        if not check.ok:
+        chosen: tuple[date, date] | None = None
+        required_days = 0
+        for candidate in (majority, longest):
+            check = check_history(
+                candidate[0],
+                candidate[1],
+                lookback_days=tuning.history_days,
+                windows=windows,
+                window_months=window_months,
+            )
+            if check.ok:
+                chosen, required_days = candidate, check.required_days
+                break
+        if chosen is None:
+            # Even the longest-history symbol cannot cover the request — refuse.
+            typer.echo(check.message)
             return None
-        # Use the most recent, confirmed, sufficiently-long span.
-        start = span[1] - timedelta(days=check.required_days)
+        # Lay windows over the most recent, sufficiently-long slice of the span.
+        start = chosen[1] - timedelta(days=required_days)
+        typer.echo(
+            f"Validating {start}..{chosen[1]} over {windows} window(s); symbols "
+            "lacking history for a given window are excluded from that window only."
+        )
         if wide:
             return await runner.validate_tiers(
                 universe,
                 EXPLORATION_CANDIDATES,
                 start,
-                span[1],
+                chosen[1],
                 window_count=windows,
                 tiers=tiers,
-                span_start=span[0],
-                span_end=span[1],
+                symbol_spans=symbol_spans,
+                span_start=majority[0],
+                span_end=majority[1],
             )
         return await runner.validate(
             universe,
             EXPLORATION_CANDIDATES,
             start,
-            span[1],
+            chosen[1],
             window_count=windows,
-            span_start=span[0],
-            span_end=span[1],
+            symbol_spans=symbol_spans,
+            span_start=majority[0],
+            span_end=majority[1],
         )
 
     report = asyncio.run(_run())
