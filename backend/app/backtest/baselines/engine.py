@@ -95,13 +95,18 @@ class BaselineEngine:
         pending: list[EntryIntent] = []
         closed: list[BacktestTrade] = []
         realized = 0.0
+        cap_skips = 0  # entries dropped by the 1x leverage cap, aggregated
+        cap_days = 0  # distinct days on which the cap dropped at least one entry
 
         for day in days:
             self._data.freeze_at(day)
             held = {p.symbol for p in open_positions} | {e.symbol for e in pending}
             plan = await self._baseline.plan(ctx, day, universe, frozenset(held))
             realized += await self._exit_day(open_positions, closed, day, plan.exits)
-            await self._open(pending, open_positions, day, realized)
+            skipped = await self._open(pending, open_positions, day, realized)
+            if skipped:
+                cap_skips += skipped
+                cap_days += 1
             pending = list(plan.entries)
 
         realized += await self._finalize(open_positions, closed, days)
@@ -113,6 +118,14 @@ class BaselineEngine:
             len(universe),
             len(closed),
         )
+        if cap_skips:
+            # One aggregated line instead of thousands of per-symbol-per-day logs.
+            logger.info(
+                "Baseline '%s': leverage cap skipped %d entries across %d days.",
+                self._baseline.name,
+                cap_skips,
+                cap_days,
+            )
         return execution.build_report(
             universe=universe,
             start=start,
@@ -150,13 +163,18 @@ class BaselineEngine:
         open_positions: list[_BaselinePosition],
         day: date,
         realized: float,
-    ) -> None:
+    ) -> int:
         """Fill yesterday's intents at today's open, capped at 1x leverage.
 
         Equal-weight intents (the buy-and-hold benchmark) are sized to
         ``capital / N`` per symbol; risk intents keep 1%-risk ATR sizing. In
         both cases total open notional is capped at current equity, so the book
         never runs on leverage (the bug that printed +744%/-83%).
+
+        Returns:
+            The number of entries dropped by the leverage cap on ``day`` (the
+            caller aggregates these into one summary line, keeping the hot loop
+            from logging thousands of times).
         """
         equity = self._config.paper.starting_capital + realized
         held = {position.symbol for position in open_positions}
@@ -165,6 +183,7 @@ class BaselineEngine:
             1 for i in pending if i.equal_weight and i.symbol not in held
         )
         allocation = equity / equal_weight_count if equal_weight_count else 0.0
+        capped = 0
         for intent in pending:
             if intent.symbol in held:
                 continue
@@ -195,7 +214,8 @@ class BaselineEngine:
                 desired_notional = size * entry
             budget = equity - committed
             if budget <= 0:
-                logger.warning(
+                capped += 1
+                logger.debug(
                     "Leverage cap hit: skipping %s on %s (book fully invested).",
                     intent.symbol,
                     day,
@@ -205,7 +225,9 @@ class BaselineEngine:
             size = round(notional / entry, 4)
             if size <= 0:
                 continue
-            committed += size * entry
+            # Reserve the intended allocation (not the share-rounded amount) so
+            # the book fills cleanly to exactly 1x and later entries are capped.
+            committed += notional
             open_positions.append(
                 _BaselinePosition(
                     symbol=intent.symbol,
@@ -225,6 +247,7 @@ class BaselineEngine:
                 )
             )
             held.add(intent.symbol)
+        return capped
 
     async def _finalize(
         self,

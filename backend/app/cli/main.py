@@ -8,12 +8,13 @@ code on failure. They contain no business logic.
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from enum import StrEnum
 from typing import TYPE_CHECKING
 
 import typer
-
-if TYPE_CHECKING:
-    from app.backtest.adjust import SplitSummary
 
 from app.cli.render import (
     render_backtest,
@@ -35,8 +36,44 @@ from app.workflow.engine import build_workflow_engine
 from app.workflow.models import WorkflowRequest, WorkflowRun
 from app.workflow.services import WorkflowServices
 
+if TYPE_CHECKING:
+    from app.backtest.adjust import SplitSummary
+
 app = typer.Typer(help="Titan — AI quant trading platform CLI.", no_args_is_help=True)
 logger = get_logger(__name__)
+
+
+class TierChoice(StrEnum):
+    """The ``--tier`` selection for ``titan validate``."""
+
+    ALL = "all"
+    LARGE = "large"
+    MID = "mid"
+    SMALL = "small"
+
+
+#: Loggers that emit per-symbol / per-request noise during a wide validation.
+_NOISY_IMPORT_LOGGERS = (
+    "app.providers.groww.sdk_provider",
+    "app.market.historical.importer.engine",
+    "app.backtest.dependencies",
+)
+
+
+@contextmanager
+def _quiet_import_logs(enabled: bool) -> Iterator[None]:
+    """Temporarily raise noisy import loggers to WARNING when ``enabled``."""
+    if not enabled:
+        yield
+        return
+    saved = {name: logging.getLogger(name).level for name in _NOISY_IMPORT_LOGGERS}
+    for name in _NOISY_IMPORT_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    try:
+        yield
+    finally:
+        for name, level in saved.items():
+            logging.getLogger(name).setLevel(level)
 
 
 def _resolve_services() -> WorkflowServices:
@@ -385,10 +422,18 @@ def validate(
         "--wide",
         help="Use the bundled wide NSE universe and report a per-cap-tier split.",
     ),
+    tier: TierChoice = typer.Option(
+        TierChoice.ALL,
+        "--tier",
+        help="Run one cap tier alone (large/mid/small) to cut memory; 'all' = full.",
+    ),
     symbols_limit: int = typer.Option(
         0,
         "--symbols-limit",
         help="Cap the universe to N symbols (balanced across tiers); 0 = no cap.",
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", help="Suppress per-symbol import logs during the run."
     ),
     exchange: Exchange = typer.Option(Exchange.NSE, help="Listing exchange."),
     interval: Interval = typer.Option(Interval.ONE_DAY, help="Candle interval."),
@@ -409,26 +454,37 @@ def validate(
         limit_by_tier,
         longest_span,
         majority_span,
+        partition_by_tier,
     )
     from app.cli.render import render_tiered_validation, render_validation
     from app.config.watchlist import load_wide_universe
 
     services = _resolve_services()
     configure_logging(services.settings)
-    if wide:
+    single_tier = tier is not TierChoice.ALL
+    # A single-tier run implies the wide universe (that is where tiers live) but
+    # loads ONLY that tier's symbols, so peak memory scales with the tier, not 60.
+    use_wide = wide or single_tier
+    if use_wide:
         watchlist = load_wide_universe()
         tiers = dict(watchlist.tiers)
         universe = list(watchlist.symbols)
+        if single_tier:
+            universe = partition_by_tier(universe, tiers).get(tier.value, [])
     else:
         tiers = {}
         universe = list(_watchlist(symbol))
     if symbols_limit > 0:
         universe = (
             limit_by_tier(universe, tiers, symbols_limit)
-            if tiers
+            if tiers and not single_tier
             else universe[:symbols_limit]
         )
-    typer.echo(f"Universe: {len(universe)} symbol(s){' [wide]' if wide else ''}")
+    label = tier.value if single_tier else ("wide" if wide else "default")
+    typer.echo(f"Universe: {len(universe)} symbol(s) [{label}]")
+    if not universe:
+        typer.echo("Empty universe — nothing to validate.")
+        raise typer.Exit(code=1)
     config = BacktestConfig(exchange=exchange, interval=interval)
     tuning = BaselineConfig()
     runner = ValidationRunner(
@@ -495,7 +551,7 @@ def validate(
             f"Validating {start}..{chosen[1]} over {windows} window(s); symbols "
             "lacking history for a given window are excluded from that window only."
         )
-        if wide:
+        if wide and not single_tier:
             return await runner.validate_tiers(
                 universe,
                 EXPLORATION_CANDIDATES,
@@ -518,7 +574,8 @@ def validate(
             span_end=majority[1],
         )
 
-    report = asyncio.run(_run())
+    with _quiet_import_logs(quiet):
+        report = asyncio.run(_run())
     if report is None:
         raise typer.Exit(code=1)
     if isinstance(report, TieredValidationReport):

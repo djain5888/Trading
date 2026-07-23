@@ -10,7 +10,9 @@ noise.
 
 from __future__ import annotations
 
+import gc
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -43,6 +45,16 @@ def is_plausible_return(return_pct: float) -> bool:
     """Return whether a benchmark window return sits in the plausible band."""
     low, high = PLAUSIBLE_RETURN_BAND
     return low <= return_pct <= high
+
+
+@dataclass(frozen=True, slots=True)
+class _WindowMetrics:
+    """The only figures validation keeps from a per-window backtest report."""
+
+    trades: int
+    expectancy_r: float
+    total_return_pct: float
+    max_drawdown_pct: float
 
 
 class HistoryCheck(BaseModel):
@@ -383,6 +395,24 @@ class ValidationRunner:
         )
         return await engine.run(symbols, start, end)
 
+    async def _run_metrics(
+        self, name: BaselineName, symbols: Sequence[str], start: date, end: date
+    ) -> _WindowMetrics:
+        """Run one strategy/window and keep ONLY the summary metrics.
+
+        The full :class:`BacktestReport` (with every closed trade, exit analysis
+        and leakage decomposition) is discarded when this returns, so peak memory
+        stays flat across a many-window, many-tier validation instead of holding
+        every window's report at once.
+        """
+        report = await self._run_one(name, symbols, start, end)
+        return _WindowMetrics(
+            trades=report.trades,
+            expectancy_r=report.expectancy_r,
+            total_return_pct=report.total_return_pct,
+            max_drawdown_pct=report.max_drawdown_pct,
+        )
+
     async def validate(
         self,
         symbols: Sequence[str],
@@ -430,16 +460,16 @@ class ValidationRunner:
             if not usable:
                 benchmark[window.index] = 0.0
                 continue
-            report = await self._run_one(
+            bench = await self._run_metrics(
                 self._benchmark, usable, window.start, window.end
             )
-            benchmark[window.index] = report.total_return_pct
-            if not is_plausible_return(report.total_return_pct):
+            benchmark[window.index] = bench.total_return_pct
+            if not is_plausible_return(bench.total_return_pct):
                 logger.error(
                     "IMPLAUSIBLE benchmark return %.1f%% for %s over %s..%s "
                     "(%d symbols) — outside %s. Suspect unadjusted split/bonus "
                     "prices or a sizing/leverage bug; do not trust this window.",
-                    report.total_return_pct,
+                    bench.total_return_pct,
                     self._benchmark.value,
                     window.start,
                     window.end,
@@ -452,7 +482,7 @@ class ValidationRunner:
             for window in windows:
                 usable = window_symbols[window.index]
                 run = (
-                    await self._run_one(name, usable, window.start, window.end)
+                    await self._run_metrics(name, usable, window.start, window.end)
                     if usable
                     else None
                 )
@@ -542,6 +572,9 @@ class ValidationRunner:
             tier_results.append(
                 TierValidation(tier=tier, symbols=tuple(members), report=report)
             )
+            # Reclaim the tier's transient backtest objects before the next tier,
+            # so peak memory does not grow with the number of tiers on a small box.
+            gc.collect()
         return TieredValidationReport(
             universe_size=len(symbols),
             symbols=tuple(symbols),
