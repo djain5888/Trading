@@ -22,14 +22,27 @@ from app.backtest.baselines.models import BaselineConfig, BaselineName
 from app.backtest.guard import LookaheadGuard
 from app.backtest.models import BacktestConfig, BacktestReport
 from app.config.watchlist import CAP_TIERS
+from app.core.logging import get_logger
 from app.indicators.engine import IndicatorEngine
 from app.market.calendar.service import MarketCalendarService
 from app.market.historical.engine import HistoricalDataEngine
+
+logger = get_logger(__name__)
 
 #: A window with fewer trades than this is statistically NOT EVALUABLE.
 DEFAULT_MIN_TRADES = 30
 #: Approximate calendar days per month, for translating a window span to days.
 _DAYS_PER_MONTH = 30
+#: Plausible band (%) for an unleveraged buy-and-hold window return. A value
+#: outside this is almost certainly a data problem (unadjusted splits), not a
+#: real move, so the runner logs it loudly.
+PLAUSIBLE_RETURN_BAND = (-60.0, 150.0)
+
+
+def is_plausible_return(return_pct: float) -> bool:
+    """Return whether a benchmark window return sits in the plausible band."""
+    low, high = PLAUSIBLE_RETURN_BAND
+    return low <= return_pct <= high
 
 
 class HistoryCheck(BaseModel):
@@ -421,6 +434,18 @@ class ValidationRunner:
                 self._benchmark, usable, window.start, window.end
             )
             benchmark[window.index] = report.total_return_pct
+            if not is_plausible_return(report.total_return_pct):
+                logger.error(
+                    "IMPLAUSIBLE benchmark return %.1f%% for %s over %s..%s "
+                    "(%d symbols) — outside %s. Suspect unadjusted split/bonus "
+                    "prices or a sizing/leverage bug; do not trust this window.",
+                    report.total_return_pct,
+                    self._benchmark.value,
+                    window.start,
+                    window.end,
+                    len(usable),
+                    PLAUSIBLE_RETURN_BAND,
+                )
 
         cells: list[ValidationCell] = []
         for name in strategies:

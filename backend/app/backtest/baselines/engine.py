@@ -151,9 +151,20 @@ class BaselineEngine:
         day: date,
         realized: float,
     ) -> None:
-        """Fill yesterday's intents at today's open with 1%-risk sizing."""
+        """Fill yesterday's intents at today's open, capped at 1x leverage.
+
+        Equal-weight intents (the buy-and-hold benchmark) are sized to
+        ``capital / N`` per symbol; risk intents keep 1%-risk ATR sizing. In
+        both cases total open notional is capped at current equity, so the book
+        never runs on leverage (the bug that printed +744%/-83%).
+        """
         equity = self._config.paper.starting_capital + realized
         held = {position.symbol for position in open_positions}
+        committed = sum(p.size * p.entry_price for p in open_positions)
+        equal_weight_count = sum(
+            1 for i in pending if i.equal_weight and i.symbol not in held
+        )
+        allocation = equity / equal_weight_count if equal_weight_count else 0.0
         for intent in pending:
             if intent.symbol in held:
                 continue
@@ -169,13 +180,32 @@ class BaselineEngine:
             raw_open = float(candle.open)
             entry = execution.entry_fill(raw_open, self._config.costs)
             stop = entry - intent.stop_distance
-            if stop <= 0:
+            if intent.equal_weight:
+                # Benchmark: allocate an equal share of capital; the ATR stop is
+                # a placeholder for the R model only (never sizes the position).
+                if stop <= 0:
+                    stop = entry * 0.99
+                desired_notional = allocation
+            else:
+                if stop <= 0:
+                    continue
+                size = execution.position_size(
+                    equity, entry, stop, self._config.paper.risk_pct
+                )
+                desired_notional = size * entry
+            budget = equity - committed
+            if budget <= 0:
+                logger.warning(
+                    "Leverage cap hit: skipping %s on %s (book fully invested).",
+                    intent.symbol,
+                    day,
+                )
                 continue
-            size = execution.position_size(
-                equity, entry, stop, self._config.paper.risk_pct
-            )
+            notional = min(desired_notional, budget)  # never exceed 1x
+            size = round(notional / entry, 4)
             if size <= 0:
                 continue
+            committed += size * entry
             open_positions.append(
                 _BaselinePosition(
                     symbol=intent.symbol,

@@ -133,7 +133,12 @@ class BuyAndHold:
         universe: Sequence[str],
         held: frozenset[str],
     ) -> BaselinePlan:
-        """Enter any not-yet-held symbol; positions never exit before the end."""
+        """Enter any not-yet-held symbol equal-weight; hold to the end.
+
+        This is the *benchmark*: an unleveraged, equal-weight buy-and-hold. Each
+        symbol is sized to capital/N by the engine (``equal_weight=True``), never
+        ATR-risk-sized, so total notional never exceeds capital (no leverage).
+        """
         entries: list[EntryIntent] = []
         for symbol in universe:
             if symbol in held:
@@ -150,6 +155,7 @@ class BuyAndHold:
                     uses_stop=False,
                     trailing_distance=None,
                     max_hold=None,
+                    equal_weight=True,
                 )
             )
         return BaselinePlan(tuple(entries))

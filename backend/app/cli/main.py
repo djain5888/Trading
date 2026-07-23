@@ -8,8 +8,12 @@ code on failure. They contain no business logic.
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 
 import typer
+
+if TYPE_CHECKING:
+    from app.backtest.adjust import SplitSummary
 
 from app.cli.render import (
     render_backtest,
@@ -43,6 +47,15 @@ def _resolve_services() -> WorkflowServices:
 def _watchlist(symbol: list[str]) -> tuple[str, ...]:
     """Return the given symbols, or the configured default watchlist if none."""
     return tuple(symbol) if symbol else get_watchlist_config().symbols
+
+
+def _report_adjustments(summaries: list[SplitSummary]) -> set[str]:
+    """Echo the split/bonus adjustment summary; return unusable symbol names."""
+    from app.cli.render import render_adjustments
+
+    if summaries:
+        typer.echo(render_adjustments(summaries))
+    return {s.symbol.strip().upper() for s in summaries if not s.usable}
 
 
 def _run_workflow(name: str, request: WorkflowRequest) -> WorkflowRun:
@@ -274,13 +287,20 @@ def backtest(
     start, end = date.fromisoformat(from_), date.fromisoformat(to)
 
     async def _run() -> BacktestReport:
+        run_universe = list(universe)
         try:
             # Load candles first (like the morning workflow) so the replay sees
             # the same data; the store is per-process and starts empty.
-            await load_backtest_history(services, universe, start, end, config)
+            summaries = await load_backtest_history(
+                services, universe, start, end, config
+            )
+            unusable = _report_adjustments(summaries)
+            run_universe = [s for s in universe if s.strip().upper() not in unusable]
         except Exception as exc:  # noqa: BLE001 - best-effort; the engine warns loudly
             logger.warning("Backtest history load failed: %s", exc)
-        return await build_backtest_engine(services, config).run(universe, start, end)
+        return await build_backtest_engine(services, config).run(
+            run_universe, start, end
+        )
 
     typer.echo(render_backtest(asyncio.run(_run())))
 
@@ -326,14 +346,19 @@ def baseline(
         raise typer.BadParameter(f"Unknown baseline '{strategy}'.") from exc
 
     async def _run() -> list[tuple[BaselineName, BacktestReport]]:
+        run_universe = list(universe)
         try:
-            await load_backtest_history(services, universe, start, end, config)
+            summaries = await load_backtest_history(
+                services, universe, start, end, config
+            )
+            unusable = _report_adjustments(summaries)
+            run_universe = [s for s in universe if s.strip().upper() not in unusable]
         except Exception as exc:  # noqa: BLE001 - best-effort; each run warns loudly
             logger.warning("Baseline history load failed: %s", exc)
         reports: list[tuple[BaselineName, BacktestReport]] = []
         for name in names:
             report = await build_baseline_engine(services, name, config=config).run(
-                universe, start, end
+                run_universe, start, end
             )
             reports.append((name, report))
         return reports
@@ -419,9 +444,12 @@ def validate(
         wide_end = date.today()
         wide_start = wide_end - timedelta(days=8 * 365)
         try:
-            await load_backtest_history(
+            summaries = await load_backtest_history(
                 services, universe, wide_start, wide_end, config
             )
+            unusable = _report_adjustments(summaries)
+            # Exclude symbols whose prices could not be reliably split-adjusted.
+            universe[:] = [s for s in universe if s.strip().upper() not in unusable]
         except Exception as exc:  # noqa: BLE001 - best-effort; span check reports it
             logger.warning("Validation history load failed: %s", exc)
         guard = LookaheadGuard(services.data_engine)
@@ -535,7 +563,10 @@ def diagnose(
 
     async def _run() -> dict[str, list[ReturnCheck]]:
         try:
-            await load_backtest_history(services, symbols, start, end, config)
+            summaries = await load_backtest_history(
+                services, symbols, start, end, config
+            )
+            _report_adjustments(summaries)
         except Exception as exc:  # noqa: BLE001 - best-effort; the audit reports gaps
             logger.warning("Diagnose history load failed: %s", exc)
         results: dict[str, list[ReturnCheck]] = {}

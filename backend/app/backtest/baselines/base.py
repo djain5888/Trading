@@ -31,6 +31,7 @@ class EntryIntent:
     uses_stop: bool  # whether the stop is an actual exit trigger
     trailing_distance: float | None  # ATR trailing distance (None = fixed/no stop)
     max_hold: int | None  # holding cap in trading days (None = until stop/exit/end)
+    equal_weight: bool = False  # size by capital/N (benchmark), not by ATR risk
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from app.backtest.adjust import SplitSummary
 from app.backtest.baselines.models import BaselineResult
 from app.backtest.diagnostics import ReturnCheck
 from app.backtest.models import (
@@ -400,6 +401,23 @@ def _passed_summary(report: ValidationReport) -> str:
     """One-line summary of which strategies passed a validation report."""
     passed = report.passed
     return ", ".join(passed) if passed else "none"
+
+
+def render_adjustments(summaries: Sequence[SplitSummary]) -> str:
+    """Render the per-symbol split/bonus adjustment summary."""
+    adjusted = [s for s in summaries if s.usable and s.events_applied]
+    unusable = [s for s in summaries if not s.usable]
+    lines = ["Split/bonus adjustment:"]
+    if adjusted:
+        detail = ", ".join(f"{s.symbol}x{s.events_applied}" for s in adjusted)
+        lines.append(f"  adjusted {len(adjusted)} symbol(s): {detail}")
+    else:
+        lines.append("  no split/bonus events detected")
+    if unusable:
+        lines.append(f"  UNUSABLE {len(unusable)} symbol(s) (excluded):")
+        for summary in unusable:
+            lines.append(f"    {summary.symbol}: {summary.reason}")
+    return "\n".join(lines)
 
 
 def render_returns_diagnosis(symbol: str, checks: Sequence[ReturnCheck]) -> str:

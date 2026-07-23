@@ -10,12 +10,14 @@ import pytest
 from app.backtest.baselines.models import BaselineConfig, BaselineName
 from app.backtest.models import BacktestConfig
 from app.backtest.validation import (
+    PLAUSIBLE_RETURN_BAND,
     ValidationCell,
     ValidationRunner,
     WindowSpec,
     build_verdict,
     check_history,
     eligible_for_window,
+    is_plausible_return,
     limit_by_tier,
     longest_span,
     majority_span,
@@ -91,6 +93,19 @@ def test_check_history_accepts_sufficient_history() -> None:
 
     assert check.ok is True
     assert check.usable_days >= check.required_days
+
+
+# -- Benchmark plausibility band (TASK-029) --------------------------------
+
+
+def test_plausible_return_band() -> None:
+    """The band accepts realistic returns and rejects leverage/data artefacts."""
+    low, high = PLAUSIBLE_RETURN_BAND
+    assert is_plausible_return(0.0) is True
+    assert is_plausible_return(25.0) is True
+    assert is_plausible_return(low) is True and is_plausible_return(high) is True
+    assert is_plausible_return(744.0) is False  # the leverage artefact
+    assert is_plausible_return(-83.0) is False  # the unadjusted-split artefact
 
 
 # -- Per-window eligibility and the majority span (TASK-027) ---------------
