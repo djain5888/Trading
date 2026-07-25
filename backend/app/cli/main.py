@@ -42,6 +42,10 @@ if TYPE_CHECKING:
 app = typer.Typer(help="Titan — AI quant trading platform CLI.", no_args_is_help=True)
 logger = get_logger(__name__)
 
+from app.portfolio.cli import portfolio_app  # noqa: E402
+
+app.add_typer(portfolio_app, name="portfolio")
+
 
 class TierChoice(StrEnum):
     """The ``--tier`` selection for ``titan validate``."""

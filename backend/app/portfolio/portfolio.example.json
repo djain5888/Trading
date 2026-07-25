@@ -1,0 +1,26 @@
+{
+  "holdings": [
+    {"identifier": "HDFCBANK", "name": "HDFC Bank", "asset_type": "EQUITY", "sleeve": "CORE"},
+    {"identifier": "INFY", "name": "Infosys", "asset_type": "EQUITY", "sleeve": "CORE"},
+    {"identifier": "RELIANCE", "name": "Reliance Industries", "asset_type": "EQUITY", "sleeve": "CORE"},
+    {"identifier": "ITC", "name": "ITC", "asset_type": "EQUITY", "sleeve": "CORE"},
+    {"identifier": "TATAMOTORS", "name": "Tata Motors", "asset_type": "EQUITY", "sleeve": "SATELLITE"},
+    {"identifier": "POLYCAB", "name": "Polycab India", "asset_type": "EQUITY", "sleeve": "SATELLITE"},
+    {"identifier": "CDSL", "name": "Central Depository Services", "asset_type": "EQUITY", "sleeve": "TACTICAL"},
+    {"identifier": "TANLA", "name": "Tanla Platforms", "asset_type": "EQUITY", "sleeve": "TACTICAL"},
+
+    {"identifier": "120503", "name": "Parag Parikh Flexi Cap Fund", "asset_type": "MF", "sleeve": "CORE"},
+    {"identifier": "119551", "name": "UTI Nifty 50 Index Fund", "asset_type": "MF", "sleeve": "CORE"},
+    {"identifier": "118989", "name": "Mirae Asset Large Cap Fund", "asset_type": "MF", "sleeve": "CORE"},
+    {"identifier": "125497", "name": "Axis Midcap Fund", "asset_type": "MF", "sleeve": "SATELLITE"},
+    {"identifier": "148618", "name": "Nippon India Small Cap Fund", "asset_type": "MF", "sleeve": "SATELLITE"},
+    {"identifier": "152712", "name": "Motilal Oswal Nasdaq 100 FOF", "asset_type": "MF", "sleeve": "TACTICAL"}
+  ],
+  "targets": {
+    "core_pct": "70",
+    "satellite_pct": "20",
+    "tactical_pct": "10",
+    "xirr_low": "15",
+    "xirr_high": "20"
+  }
+}
