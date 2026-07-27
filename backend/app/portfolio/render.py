@@ -86,6 +86,16 @@ def render_portfolio(report: PortfolioReport) -> str:
             f"{_pct(h.xirr_pct):>9}{h.ltcg_ready_value:>12,.0f}{price_flag}"
         )
 
+    na_xirr = [
+        h.identifier for h in report.holdings if h.units > 0 and h.xirr_pct is None
+    ]
+    if na_xirr or report.xirr_pct is None:
+        lines.append("")
+        lines.append(
+            "XIRR n/a: undefined cashflows (e.g. fully exited, or same-day "
+            f"round trips with no elapsed time): {', '.join(na_xirr) or 'portfolio'}"
+        )
+
     if report.unpriced:
         lines.append("")
         lines.append(f"UNPRICED (excluded from value): {', '.join(report.unpriced)}")
