@@ -44,6 +44,9 @@ class HoldingReport(BaseModel):
     ltcg_value_90d: Decimal = Field(description="Extra value long-term within 90 days.")
     exit_tax: Decimal = Field(description="Estimated tax on a full exit now.")
     priced: bool = Field(description="Whether a valuation price was available.")
+    matched_code: str | None = Field(
+        default=None, description="Resolved AMFI scheme code (MF holdings)."
+    )
 
 
 class SleeveReport(BaseModel):
@@ -56,6 +59,9 @@ class SleeveReport(BaseModel):
     actual_pct: float = Field(description="Share of portfolio value (%).")
     target_pct: float = Field(description="Target weight (%).")
     xirr_pct: float | None = Field(description="Sleeve XIRR (%), None if n/a.")
+    xirr_incomplete: bool = Field(
+        default=False, description="XIRR withheld: a member holding is unpriced."
+    )
 
     @property
     def drift_pct(self) -> float:
@@ -71,6 +77,9 @@ class AssetClassReport(BaseModel):
     asset_type: AssetType = Field(description="Asset class.")
     market_value: Decimal = Field(description="Market value.")
     xirr_pct: float | None = Field(description="Asset-class XIRR (%).")
+    xirr_incomplete: bool = Field(
+        default=False, description="XIRR withheld: a member holding is unpriced."
+    )
 
 
 class PortfolioReport(BaseModel):
@@ -86,6 +95,9 @@ class PortfolioReport(BaseModel):
     realised_gain: Decimal = Field(description="Total realised gain to date.")
     absolute_return_pct: float = Field(description="Simple absolute return (%).")
     xirr_pct: float | None = Field(description="Portfolio XIRR (%).")
+    xirr_incomplete: bool = Field(
+        default=False, description="Portfolio XIRR withheld: some holding is unpriced."
+    )
     band_low: float = Field(description="Lower XIRR band (%).")
     band_high: float = Field(description="Upper XIRR band (%).")
     band_status: BandStatus = Field(description="XIRR vs band.")
@@ -99,6 +111,9 @@ class PortfolioReport(BaseModel):
     holdings: tuple[HoldingReport, ...] = Field(description="Per-holding reports.")
     unpriced: tuple[str, ...] = Field(
         default=(), description="Holdings with no valuation price."
+    )
+    unmatched_schemes: tuple[str, ...] = Field(
+        default=(), description="MF holdings that could not be matched to an AMFI code."
     )
     mismatches: tuple[HoldingMismatch, ...] = Field(
         default=(), description="Broker cross-check discrepancies."

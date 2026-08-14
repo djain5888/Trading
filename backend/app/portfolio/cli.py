@@ -17,7 +17,7 @@ from pathlib import Path
 import typer
 
 from app.core.logging import configure_logging, get_logger
-from app.portfolio.engine import analyse_portfolio
+from app.portfolio.engine import analyse_portfolio, raise_for_unmatched
 from app.portfolio.importers.base import ImportResult
 from app.portfolio.importers.cas_mf import parse_cas_csv
 from app.portfolio.importers.groww_equity import parse_groww_equity_csv
@@ -138,6 +138,11 @@ def _show(*, offline: bool) -> None:
         nav=nav,
         broker_units=broker_units,
     )
+    # Fail loudly if any MF scheme could not be matched to an AMFI code (BUG 1).
+    try:
+        raise_for_unmatched(report)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(render_portfolio(report))
 
 

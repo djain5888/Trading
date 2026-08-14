@@ -106,10 +106,14 @@ class Holding(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    identifier: str = Field(min_length=1, description="Ticker / scheme code.")
+    identifier: str = Field(min_length=1, description="Ticker / scheme code / name.")
     name: str = Field(min_length=1, description="Human-readable name.")
     asset_type: AssetType = Field(description="EQUITY or MF.")
     sleeve: Sleeve = Field(description="CORE / SATELLITE / TACTICAL.")
+    scheme_code: str | None = Field(
+        default=None,
+        description="Explicit AMFI scheme code override (MF only, skips name match).",
+    )
 
     @property
     def key(self) -> tuple[AssetType, str]:

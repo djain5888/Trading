@@ -20,7 +20,7 @@ from app.portfolio.models import (
     Transaction,
     TxnType,
 )
-from app.portfolio.nav import NavSnapshot
+from app.portfolio.nav import NavEntry, NavSnapshot
 from app.portfolio.prices import HoldingMismatch, cross_check_holdings
 from app.portfolio.report import (
     AssetClassReport,
@@ -57,15 +57,22 @@ def analyse_portfolio(
 
     holding_reports: list[HoldingReport] = []
     unpriced: list[str] = []
+    unmatched: list[str] = []
     imported_units: dict[str, Decimal] = {}
 
     for holding in config.holdings:
         txns = grouped.get(holding.key, [])
-        price = _price_for(holding, equity_prices, nav)
-        report = _analyse_holding(holding, txns, valuation_date, price, taxes)
+        price, matched_code = _price_for(holding, equity_prices, nav)
+        report = _analyse_holding(
+            holding, txns, valuation_date, price, matched_code, taxes
+        )
         holding_reports.append(report)
         if not report.priced and report.units > 0:
             unpriced.append(holding.identifier)
+            # An MF with a NAV file loaded but no resolvable code is a config
+            # error the user must fix (BUG 1): flag it for the loud failure.
+            if holding.asset_type is AssetType.MF and nav is not None:
+                unmatched.append(holding.identifier)
         if holding.asset_type is AssetType.EQUITY and report.units > 0:
             imported_units[holding.identifier] = report.units
 
@@ -76,7 +83,12 @@ def analyse_portfolio(
         config, holding_reports, grouped, valuation_date, total_value
     )
     asset_classes = _asset_class_reports(holding_reports, grouped, valuation_date)
-    portfolio_xirr = _aggregate_xirr(transactions, total_value, valuation_date)
+    portfolio_incomplete = _has_unpriced(holding_reports)
+    portfolio_xirr = (
+        None
+        if portfolio_incomplete
+        else _aggregate_xirr(transactions, total_value, valuation_date)
+    )
 
     return _build_report(
         config=config,
@@ -84,9 +96,11 @@ def analyse_portfolio(
         holding_reports=holding_reports,
         total_value=total_value,
         portfolio_xirr=portfolio_xirr,
+        portfolio_incomplete=portfolio_incomplete,
         sleeves=sleeves,
         asset_classes=asset_classes,
         unpriced=unpriced,
+        unmatched=unmatched,
         mismatches=mismatches,
     )
 
@@ -103,16 +117,40 @@ def _group(
 
 def _price_for(
     holding: Holding, equity_prices: Mapping[str, Decimal], nav: NavSnapshot | None
-) -> Decimal | None:
-    """Return the valuation price for a holding (close or NAV), or ``None``."""
+) -> tuple[Decimal | None, str | None]:
+    """Return ``(price, matched_code)`` for a holding.
+
+    Equities price by close (no code). MF holdings resolve their AMFI NAV via,
+    in order: an explicit ``scheme_code`` override, the identifier treated as a
+    code, then a fuzzy scheme-name match (BUG 1) — so ``portfolio.json`` may use
+    plain scheme names. ``matched_code`` records which AMFI code was used.
+    """
     if holding.asset_type is AssetType.EQUITY:
-        return equity_prices.get(holding.identifier.upper()) or equity_prices.get(
+        price = equity_prices.get(holding.identifier.upper()) or equity_prices.get(
             holding.identifier
         )
+        return price, None
     if nav is None:
-        return None
-    entry = nav.get(holding.identifier)
-    return entry.nav if entry is not None else None
+        return None, None
+    entry = _resolve_mf(holding, nav)
+    return (entry.nav, entry.scheme_code) if entry is not None else (None, None)
+
+
+def _resolve_mf(holding: Holding, nav: NavSnapshot) -> NavEntry | None:
+    """Resolve an MF holding to an AMFI NAV entry (code override, code, or name)."""
+    if holding.scheme_code:
+        entry = nav.get(holding.scheme_code)
+        if entry is not None:
+            return entry
+    direct = nav.get(holding.identifier)
+    if direct is not None:
+        return direct
+    return nav.match_by_name(holding.name) or nav.match_by_name(holding.identifier)
+
+
+def _has_unpriced(holding_reports: Sequence[HoldingReport]) -> bool:
+    """Return whether any held (units > 0) holding lacks a valuation price."""
+    return any(not r.priced and r.units > 0 for r in holding_reports)
 
 
 def _analyse_holding(
@@ -120,6 +158,7 @@ def _analyse_holding(
     txns: Sequence[Transaction],
     valuation_date: date,
     price: Decimal | None,
+    matched_code: str | None,
     taxes: TaxConfig,
 ) -> HoldingReport:
     """Measure a single holding."""
@@ -144,9 +183,16 @@ def _analyse_holding(
         ).total_tax
     else:
         etax = Decimal(0)
-    xirr_rate = xirr(
-        cashflows_from(txns, terminal_value=market_value, terminal_date=valuation_date)
-    )
+    # An unpriced holding that still holds units has no meaningful terminal
+    # value, so its XIRR would be garbage — withhold it (BUG 2).
+    if not priced and units > 0:
+        xirr_rate = None
+    else:
+        xirr_rate = xirr(
+            cashflows_from(
+                txns, terminal_value=market_value, terminal_date=valuation_date
+            )
+        )
     abs_ret = absolute_return_pct(
         invested, market_value + realised_proceeds + dividends
     )
@@ -176,6 +222,7 @@ def _analyse_holding(
         ltcg_value_90d=ltcg_90d,
         exit_tax=etax,
         priced=priced,
+        matched_code=matched_code,
     )
 
 
@@ -200,20 +247,25 @@ def _sleeve_reports(
     reports: list[SleeveReport] = []
     for sleeve in Sleeve:
         members = [h for h in config.holdings if h.sleeve is sleeve]
-        value = sum(
-            (r.market_value for r in holding_reports if r.sleeve is sleeve), Decimal(0)
-        )
+        sleeve_reports = [r for r in holding_reports if r.sleeve is sleeve]
+        value = sum((r.market_value for r in sleeve_reports), Decimal(0))
         txns: list[Transaction] = []
         for holding in members:
             txns.extend(grouped.get(holding.key, []))
         actual = float(value / total_value * 100) if total_value > 0 else 0.0
+        incomplete = _has_unpriced(sleeve_reports)
         reports.append(
             SleeveReport(
                 sleeve=sleeve,
                 market_value=value,
                 actual_pct=round(actual, 2),
                 target_pct=float(config.targets.target_for(sleeve)),
-                xirr_pct=_to_pct(_aggregate_xirr(txns, value, valuation_date)),
+                xirr_pct=(
+                    None
+                    if incomplete
+                    else _to_pct(_aggregate_xirr(txns, value, valuation_date))
+                ),
+                xirr_incomplete=incomplete,
             )
         )
     return tuple(reports)
@@ -227,20 +279,24 @@ def _asset_class_reports(
     """Build per-asset-class roll-ups."""
     reports: list[AssetClassReport] = []
     for asset_type in AssetType:
-        value = sum(
-            (r.market_value for r in holding_reports if r.asset_type is asset_type),
-            Decimal(0),
-        )
+        members = [r for r in holding_reports if r.asset_type is asset_type]
+        value = sum((r.market_value for r in members), Decimal(0))
         txns = [
             txn for key, rows in grouped.items() if key[0] is asset_type for txn in rows
         ]
         if not txns:
             continue
+        incomplete = _has_unpriced(members)
         reports.append(
             AssetClassReport(
                 asset_type=asset_type,
                 market_value=value,
-                xirr_pct=_to_pct(_aggregate_xirr(txns, value, valuation_date)),
+                xirr_pct=(
+                    None
+                    if incomplete
+                    else _to_pct(_aggregate_xirr(txns, value, valuation_date))
+                ),
+                xirr_incomplete=incomplete,
             )
         )
     return tuple(reports)
@@ -281,9 +337,11 @@ def _build_report(
     holding_reports: Sequence[HoldingReport],
     total_value: Decimal,
     portfolio_xirr: float | None,
+    portfolio_incomplete: bool,
     sleeves: tuple[SleeveReport, ...],
     asset_classes: tuple[AssetClassReport, ...],
     unpriced: Sequence[str],
+    unmatched: Sequence[str],
     mismatches: tuple[HoldingMismatch, ...],
 ) -> PortfolioReport:
     """Assemble the top-level portfolio report from the parts."""
@@ -317,6 +375,7 @@ def _build_report(
         realised_gain=realised_gain,
         absolute_return_pct=round(abs_ret, 2),
         xirr_pct=xirr_pct,
+        xirr_incomplete=portfolio_incomplete,
         band_low=low,
         band_high=high,
         band_status=_band_status(xirr_pct, low, high),
@@ -329,5 +388,27 @@ def _build_report(
         asset_classes=asset_classes,
         holdings=tuple(holding_reports),
         unpriced=tuple(unpriced),
+        unmatched_schemes=tuple(unmatched),
         mismatches=mismatches,
     )
+
+
+def raise_for_unmatched(report: PortfolioReport) -> None:
+    """Fail loudly if any MF scheme could not be matched to an AMFI code.
+
+    An unmatched scheme means the portfolio config's name (or code) does not
+    resolve against the NAV file, so those holdings cannot be valued. Rather
+    than silently valuing them at zero, the caller stops and tells the user
+    exactly which schemes to fix (add an explicit ``scheme_code`` or correct
+    the name).
+
+    Raises:
+        ValueError: If ``report.unmatched_schemes`` is non-empty.
+    """
+    if report.unmatched_schemes:
+        joined = ", ".join(report.unmatched_schemes)
+        raise ValueError(
+            "Could not match these mutual-fund holdings to an AMFI scheme code: "
+            f"{joined}. Fix the scheme name in portfolio.json or add an explicit "
+            '"scheme_code".'
+        )

@@ -29,6 +29,13 @@ def _pct(value: float | None) -> str:
     return "n/a" if value is None else f"{value:+.2f}%"
 
 
+def _xirr(value: float | None, *, incomplete: bool = False) -> str:
+    """Format an aggregate XIRR, flagging withheld values from incomplete pricing."""
+    if incomplete:
+        return "n/a (incomplete pricing)"
+    return _pct(value)
+
+
 def render_portfolio(report: PortfolioReport) -> str:
     """Render the full portfolio measurement report."""
     lines = [
@@ -39,11 +46,19 @@ def render_portfolio(report: PortfolioReport) -> str:
         f"Unrealised P&L:   {report.unrealised_pnl:+,.2f} "
         f"({report.absolute_return_pct:+.2f}% on invested)",
         f"Realised Gain:    {report.realised_gain:+,.2f}",
-        f"Portfolio XIRR:   {_pct(report.xirr_pct)}  "
-        f"[band {report.band_low:.0f}-{report.band_high:.0f}%: "
-        f"{report.band_status.value}]",
+        f"Portfolio XIRR:   {_xirr(report.xirr_pct, incomplete=report.xirr_incomplete)}"
+        + (
+            ""
+            if report.xirr_incomplete
+            else f"  [band {report.band_low:.0f}-{report.band_high:.0f}%: "
+            f"{report.band_status.value}]"
+        ),
     ]
-    if report.band_status.value != "WITHIN" and report.drags:
+    if (
+        not report.xirr_incomplete
+        and report.band_status.value != "WITHIN"
+        and report.drags
+    ):
         lines.append(f"Biggest drags:    {', '.join(report.drags)}")
     lines.append(
         f"Concentration:    {report.concentration_id} "
@@ -60,7 +75,8 @@ def render_portfolio(report: PortfolioReport) -> str:
         lines.append(
             f"  {sleeve.sleeve.value:<10} {sleeve.actual_pct:5.1f}% "
             f"(target {sleeve.target_pct:4.0f}%, drift {sleeve.drift_pct:+.1f}pp)  "
-            f"XIRR {_pct(sleeve.xirr_pct)}  value {sleeve.market_value:,.0f}"
+            f"XIRR {_xirr(sleeve.xirr_pct, incomplete=sleeve.xirr_incomplete)}  "
+            f"value {sleeve.market_value:,.0f}"
         )
 
     lines.append("")
@@ -68,7 +84,7 @@ def render_portfolio(report: PortfolioReport) -> str:
     for ac in report.asset_classes:
         lines.append(
             f"  {ac.asset_type.value:<7} value {ac.market_value:,.0f}  "
-            f"XIRR {_pct(ac.xirr_pct)}"
+            f"XIRR {_xirr(ac.xirr_pct, incomplete=ac.xirr_incomplete)}"
         )
 
     lines.append("")
@@ -79,11 +95,13 @@ def render_portfolio(report: PortfolioReport) -> str:
     )
     lines.append(header)
     for h in sorted(report.holdings, key=lambda x: x.market_value, reverse=True):
-        price_flag = "" if h.priced else " *unpriced"
+        flag = "" if h.priced else " *unpriced"
+        if h.matched_code is not None:
+            flag += f" [AMFI {h.matched_code}]"
         lines.append(
             f"  {h.identifier:<14}{h.sleeve.value:<10}{h.market_value:>12,.0f}"
             f"{h.unrealised_pnl:>+12,.0f}{h.absolute_return_pct:>7.1f}%"
-            f"{_pct(h.xirr_pct):>9}{h.ltcg_ready_value:>12,.0f}{price_flag}"
+            f"{_pct(h.xirr_pct):>9}{h.ltcg_ready_value:>12,.0f}{flag}"
         )
 
     na_xirr = [
@@ -96,6 +114,12 @@ def render_portfolio(report: PortfolioReport) -> str:
             f"round trips with no elapsed time): {', '.join(na_xirr) or 'portfolio'}"
         )
 
+    if report.unmatched_schemes:
+        lines.append("")
+        lines.append(
+            "UNMATCHED MF schemes (no AMFI code — fix name or add scheme_code): "
+            f"{', '.join(report.unmatched_schemes)}"
+        )
     if report.unpriced:
         lines.append("")
         lines.append(f"UNPRICED (excluded from value): {', '.join(report.unpriced)}")

@@ -16,6 +16,7 @@ fully testable.
 from __future__ import annotations
 
 import datetime
+import re
 from collections.abc import Callable
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
@@ -32,6 +33,50 @@ logger = get_logger(__name__)
 AMFI_NAVALL_URL = "https://portal.amfiindia.com/spages/NAVAll.txt"
 #: A cached snapshot older than this (calendar days) is considered stale.
 DEFAULT_MAX_STALE_DAYS = 5
+#: Plan/option words that distinguish AMFI variants but not the scheme itself.
+#: Dropping them lets a portfolio's plain scheme name match any variant.
+_PLAN_NOISE = frozenset(
+    {
+        "direct",
+        "regular",
+        "plan",
+        "growth",
+        "idcw",
+        "dividend",
+        "payout",
+        "reinvestment",
+        "reinvest",
+        "option",
+        "div",
+    }
+)
+#: Minimum Jaccard token overlap for a fuzzy scheme-name match to be accepted.
+DEFAULT_NAME_MATCH_THRESHOLD = 0.6
+
+
+def scheme_name_tokens(name: str) -> frozenset[str]:
+    """Normalise a scheme name to a set of distinctive tokens.
+
+    Lower-cases, strips punctuation, and drops plan/option noise words
+    ("Direct", "Regular", "Growth", "IDCW", ...) so a portfolio's plain
+    "Parag Parikh Flexi Cap Fund" matches the AMFI "... - Direct Plan - Growth".
+    """
+    cleaned = re.sub(r"[^a-z0-9]+", " ", name.lower())
+    return frozenset(
+        token for token in cleaned.split() if token and token not in _PLAN_NOISE
+    )
+
+
+def _variant_rank(entry: NavEntry) -> tuple[int, str]:
+    """Deterministic preference among equal-scoring variants (Direct Growth first)."""
+    raw = entry.name.lower()
+    if "direct" in raw and "growth" in raw:
+        tier = 0
+    elif "growth" in raw:
+        tier = 1
+    else:
+        tier = 2
+    return (tier, entry.scheme_code)
 
 
 class NavEntry(BaseModel):
@@ -56,6 +101,36 @@ class NavSnapshot(BaseModel):
     def get(self, scheme_code: str) -> NavEntry | None:
         """Return the NAV entry for a scheme code, or ``None``."""
         return self.entries.get(scheme_code.strip())
+
+    def match_by_name(
+        self, name: str, *, threshold: float = DEFAULT_NAME_MATCH_THRESHOLD
+    ) -> NavEntry | None:
+        """Fuzzy-match a scheme name to an AMFI entry by normalised token overlap.
+
+        Returns the best entry whose Jaccard token similarity meets ``threshold``.
+        Ties (typically the Direct/Regular × Growth/IDCW variants that collapse
+        to the same tokens) are broken deterministically, preferring the Direct
+        Growth variant so valuation is stable run to run. ``None`` if nothing
+        clears the threshold.
+        """
+        query = scheme_name_tokens(name)
+        if not query:
+            return None
+        best_score = 0.0
+        best: list[NavEntry] = []
+        for entry in self.entries.values():
+            tokens = scheme_name_tokens(entry.name)
+            union = len(query | tokens)
+            if union == 0:
+                continue
+            score = len(query & tokens) / union
+            if score > best_score + 1e-9:
+                best_score, best = score, [entry]
+            elif abs(score - best_score) <= 1e-9:
+                best.append(entry)
+        if best_score < threshold or not best:
+            return None
+        return min(best, key=_variant_rank)
 
     def is_stale(self, on: date, max_days: int = DEFAULT_MAX_STALE_DAYS) -> bool:
         """Return whether the snapshot is older than ``max_days`` before ``on``."""
