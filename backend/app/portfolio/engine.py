@@ -31,6 +31,7 @@ from app.portfolio.prices import HoldingMismatch, cross_check_holdings
 from app.portfolio.report import (
     AssetClassReport,
     BandStatus,
+    ClosedPosition,
     HoldingReport,
     PortfolioReport,
     SleeveReport,
@@ -91,18 +92,23 @@ def analyse_portfolio(
         if holding.asset_type is AssetType.EQUITY and report.units > 0:
             imported_units[holding.identifier] = report.units
 
-    # Join-integrity checks (BUG A/B).
+    # Join-integrity checks (BUG A). A config holding that matched no
+    # transactions is a genuine error (you can't hold something you never
+    # bought).
     zero_txn = [
         h.identifier
         for h in config.holdings
         if h.asset_type is AssetType.MF and not per_holding[h.key]
     ]
-    unmatched_tx_labels = sorted({(t.name or t.identifier) for t in unmatched_txns})
-    join_errors = [
-        h.identifier for h in holding_reports if h.matched_txns > 0 and h.units == 0
-    ]
     for identifier in zero_txn:
         logger.error("MF holding %s matched ZERO transactions.", identifier)
+
+    # Orphan transactions (no config holding): a net-zero group is a legitimately
+    # CLOSED position; a non-zero group means the user holds something not in
+    # portfolio.json — a genuine error.
+    closed_positions, closed_txns, held_unconfigured = _classify_orphans(
+        unmatched_txns, valuation_date
+    )
 
     total_value = sum((h.market_value for h in holding_reports), Decimal(0))
     mismatches = _cross_check(imported_units, broker_units)
@@ -112,11 +118,13 @@ def analyse_portfolio(
     )
     asset_classes = _asset_class_reports(holding_reports, per_holding, valuation_date)
     portfolio_incomplete = _aggregate_blocked(holding_reports)
+    # Portfolio XIRR spans every real cashflow: held holdings AND closed
+    # positions (their money-in/out is real), valued to the current book value.
     matched = [txn for txns in per_holding.values() for txn in txns]
     portfolio_xirr = (
         None
         if portfolio_incomplete
-        else _aggregate_xirr(matched, total_value, valuation_date)
+        else _aggregate_xirr(matched + closed_txns, total_value, valuation_date)
     )
 
     return _build_report(
@@ -131,10 +139,54 @@ def analyse_portfolio(
         unpriced=unpriced,
         unmatched=unmatched,
         zero_txn=zero_txn,
-        unmatched_transactions=unmatched_tx_labels,
-        join_errors=join_errors,
+        closed_positions=closed_positions,
+        held_unconfigured=held_unconfigured,
         mismatches=mismatches,
     )
+
+
+def _classify_orphans(
+    orphans: Sequence[Transaction], valuation_date: date
+) -> tuple[tuple[ClosedPosition, ...], list[Transaction], list[str]]:
+    """Split orphan transactions into closed positions vs held-but-unconfigured.
+
+    Orphans are grouped by their own key. A group whose net units are zero is a
+    legitimately closed position — reported with its realised P&L and XIRR, and
+    its cashflows still count toward the portfolio return. A group with a
+    non-zero (or negative/over-sold) net position means the user holds something
+    absent from ``portfolio.json`` — a genuine error the caller fails on.
+    """
+    groups: dict[tuple[AssetType, str], list[Transaction]] = {}
+    for txn in orphans:
+        groups.setdefault(txn.key, []).append(txn)
+
+    closed: list[ClosedPosition] = []
+    closed_txns: list[Transaction] = []
+    held: list[str] = []
+    for (asset_type, identifier), txns in groups.items():
+        bought = sum((t.units for t in txns if t.txn_type is TxnType.BUY), Decimal(0))
+        sold = sum((t.units for t in txns if t.txn_type is TxnType.SELL), Decimal(0))
+        label = next((t.name for t in txns if t.name), identifier)
+        if bought == sold:  # fully exited (net zero)
+            realised = sum((t.cashflow() for t in txns), Decimal(0))
+            rate = xirr(
+                cashflows_from(
+                    txns, terminal_value=Decimal(0), terminal_date=valuation_date
+                )
+            )
+            closed.append(
+                ClosedPosition(
+                    identifier=label,
+                    asset_type=asset_type,
+                    realised_gain=realised,
+                    xirr_pct=_to_pct(rate),
+                    trades=len(txns),
+                )
+            )
+            closed_txns.extend(txns)
+        else:  # still holding something not in the config
+            held.append(label)
+    return tuple(closed), closed_txns, sorted(held)
 
 
 def _assign_transactions(
@@ -233,14 +285,12 @@ def _resolve_mf(holding: Holding, nav: NavSnapshot) -> NavEntry | None:
 def _aggregate_blocked(holding_reports: Sequence[HoldingReport]) -> bool:
     """Return whether an aggregate's XIRR must be withheld.
 
-    True when any member is either held-but-unpriced (no valuation price) or a
-    join error (transactions present but zero resolved units) — in both cases a
-    computed XIRR would be garbage, so it is reported as n/a (BUG B).
+    True only when a member is *held but unpriced* — a real valuation gap that
+    would make the XIRR garbage. A fully-exited member (transactions but zero
+    units) is NOT blocking: its cashflows are complete and its XIRR is well
+    defined, so it counts normally.
     """
-    return any(
-        (r.units > 0 and not r.priced) or (r.matched_txns > 0 and r.units == 0)
-        for r in holding_reports
-    )
+    return any(r.units > 0 and not r.priced for r in holding_reports)
 
 
 def _analyse_holding(
@@ -273,10 +323,10 @@ def _analyse_holding(
         ).total_tax
     else:
         etax = Decimal(0)
-    # A held-but-unpriced holding, or one with transactions but no resolved
-    # units (a join error), has no meaningful terminal value — withhold its
-    # XIRR rather than compute garbage (BUG B).
-    if (not priced and units > 0) or (len(txns) > 0 and units == 0):
+    # A held-but-unpriced holding has no meaningful terminal value, so its XIRR
+    # would be garbage — withhold it. A fully-exited holding (units 0) keeps its
+    # XIRR: buys out and sells in are complete, real cashflows.
+    if not priced and units > 0:
         xirr_rate = None
     else:
         xirr_rate = xirr(
@@ -435,8 +485,8 @@ def _build_report(
     unpriced: Sequence[str],
     unmatched: Sequence[str],
     zero_txn: Sequence[str],
-    unmatched_transactions: Sequence[str],
-    join_errors: Sequence[str],
+    closed_positions: tuple[ClosedPosition, ...],
+    held_unconfigured: Sequence[str],
     mismatches: tuple[HoldingMismatch, ...],
 ) -> PortfolioReport:
     """Assemble the top-level portfolio report from the parts."""
@@ -485,8 +535,8 @@ def _build_report(
         unpriced=tuple(unpriced),
         unmatched_schemes=tuple(unmatched),
         zero_txn_holdings=tuple(zero_txn),
-        unmatched_transactions=tuple(unmatched_transactions),
-        join_errors=tuple(join_errors),
+        closed_positions=closed_positions,
+        held_unconfigured=tuple(held_unconfigured),
         mismatches=mismatches,
     )
 
@@ -494,12 +544,13 @@ def _build_report(
 def raise_for_join_errors(report: PortfolioReport) -> None:
     """Fail loudly on transaction↔holding join failures (BUG A).
 
-    Raises if any MF holding matched zero transactions, or any transaction's
-    scheme matched no holding — both mean the statement and ``portfolio.json``
-    disagree on scheme identity and the numbers cannot be trusted.
+    Raises if any MF holding matched zero transactions, or a NON-ZERO position
+    exists for a scheme not in ``portfolio.json`` (the user holds something the
+    config omits). Fully-exited (closed) positions are legitimate history and do
+    NOT raise.
 
     Raises:
-        ValueError: If there are unjoined holdings or transactions.
+        ValueError: If there are unjoined holdings or unconfigured holdings.
     """
     problems: list[str] = []
     if report.zero_txn_holdings:
@@ -507,15 +558,15 @@ def raise_for_join_errors(report: PortfolioReport) -> None:
             "MF holdings with ZERO matched transactions: "
             + ", ".join(report.zero_txn_holdings)
         )
-    if report.unmatched_transactions:
+    if report.held_unconfigured:
         problems.append(
-            "transactions matching no holding: "
-            + ", ".join(report.unmatched_transactions)
+            "open positions absent from portfolio.json: "
+            + ", ".join(report.held_unconfigured)
         )
     if problems:
         raise ValueError(
             "Transaction join failed — fix scheme names in portfolio.json or add "
-            "explicit scheme_code. " + "; ".join(problems)
+            "the missing holding. " + "; ".join(problems)
         )
 
 

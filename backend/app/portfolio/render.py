@@ -114,23 +114,31 @@ def render_portfolio(report: PortfolioReport) -> str:
             f"round trips with no elapsed time): {', '.join(na_xirr) or 'portfolio'}"
         )
 
+    if report.closed_positions:
+        lines.append("")
+        lines.append(
+            f"Closed positions ({len(report.closed_positions)}) "
+            "— fully exited, realised (still count toward portfolio XIRR):"
+        )
+        lines.append(f"  {'symbol':<20}{'realised':>14}{'xirr':>10}{'trades':>8}")
+        for pos in sorted(
+            report.closed_positions, key=lambda p: p.realised_gain, reverse=True
+        ):
+            lines.append(
+                f"  {pos.identifier:<20}{pos.realised_gain:>+14,.0f}"
+                f"{_pct(pos.xirr_pct):>10}{pos.trades:>8}"
+            )
     if report.zero_txn_holdings:
         lines.append("")
         lines.append(
             "JOIN ERROR — MF holdings with ZERO matched transactions "
             f"(check scheme names / scheme_code): {', '.join(report.zero_txn_holdings)}"
         )
-    if report.unmatched_transactions:
+    if report.held_unconfigured:
         lines.append("")
         lines.append(
-            "JOIN ERROR — transactions matching no holding: "
-            f"{', '.join(report.unmatched_transactions)}"
-        )
-    if report.join_errors:
-        lines.append("")
-        lines.append(
-            "JOIN ERROR — holdings with transactions but zero units: "
-            f"{', '.join(report.join_errors)}"
+            "JOIN ERROR — open positions absent from portfolio.json "
+            f"(add them): {', '.join(report.held_unconfigured)}"
         )
     if report.unmatched_schemes:
         lines.append("")

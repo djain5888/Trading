@@ -85,6 +85,18 @@ class AssetClassReport(BaseModel):
     )
 
 
+class ClosedPosition(BaseModel):
+    """A fully-exited position: transactions exist but the net holding is zero."""
+
+    model_config = ConfigDict(frozen=True)
+
+    identifier: str = Field(description="Symbol / scheme label.")
+    asset_type: AssetType = Field(description="EQUITY or MF.")
+    realised_gain: Decimal = Field(description="Net realised P&L over the position.")
+    xirr_pct: float | None = Field(description="Annualised XIRR (%), None if n/a.")
+    trades: int = Field(ge=0, description="Number of transactions.")
+
+
 class PortfolioReport(BaseModel):
     """The full portfolio measurement (no signals — analysis only)."""
 
@@ -121,11 +133,12 @@ class PortfolioReport(BaseModel):
     zero_txn_holdings: tuple[str, ...] = Field(
         default=(), description="MF holdings that matched zero transactions."
     )
-    unmatched_transactions: tuple[str, ...] = Field(
-        default=(), description="Transaction schemes that matched no holding."
+    closed_positions: tuple[ClosedPosition, ...] = Field(
+        default=(), description="Fully-exited positions not in the current config."
     )
-    join_errors: tuple[str, ...] = Field(
-        default=(), description="Holdings with transactions but zero resolved units."
+    held_unconfigured: tuple[str, ...] = Field(
+        default=(),
+        description="Non-zero positions with transactions but no config holding.",
     )
     mismatches: tuple[HoldingMismatch, ...] = Field(
         default=(), description="Broker cross-check discrepancies."

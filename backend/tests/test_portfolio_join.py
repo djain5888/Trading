@@ -74,7 +74,7 @@ def test_mf_transactions_join_by_normalised_name() -> None:
     assert holding.units == Decimal("150")
     assert holding.market_value == Decimal("9814.815")  # 150 * 65.4321
     assert report.zero_txn_holdings == ()
-    assert report.unmatched_transactions == ()
+    assert report.held_unconfigured == ()
     raise_for_join_errors(report)  # clean join -> no raise
 
 
@@ -98,13 +98,61 @@ def test_zero_match_holding_and_orphan_txn_raise() -> None:
     )
 
     assert "PPFCF" in report.zero_txn_holdings
-    assert any("Quantum" in label for label in report.unmatched_transactions)
+    # A non-zero orphan position (still holding something not in config) is an
+    # error listed under held_unconfigured.
+    assert any("Quantum" in label for label in report.held_unconfigured)
     with pytest.raises(ValueError, match="Transaction join failed"):
         raise_for_join_errors(report)
 
 
-def test_fully_joined_but_zero_units_is_flagged() -> None:
-    """A holding whose txns net to zero units is a join error and blocks XIRR."""
+# -- Closed positions (fully exited) are legitimate, not errors ------------
+
+
+def test_fully_exited_orphan_is_a_closed_position_not_an_error() -> None:
+    """An exited symbol absent from config is a closed position, not a failure."""
+    config = PortfolioConfig(
+        holdings=(_mf_holding("PPFCF", "Parag Parikh Flexi Cap Fund"),)
+    )
+    # A holding fully bought then sold, and it is NOT in portfolio.json.
+    orphan = [
+        _mf_txn("Quantum Long Term Equity", TxnType.BUY, date(2021, 1, 1), "100", "20"),
+        _mf_txn(
+            "Quantum Long Term Equity", TxnType.SELL, date(2023, 1, 1), "100", "26"
+        ),
+    ]
+    # Plus a genuinely held, configured MF so the run has an open position too.
+    held = [
+        _mf_txn(
+            "Parag Parikh Flexi Cap Fund", TxnType.BUY, date(2022, 1, 1), "10", "40"
+        )
+    ]
+    nav = parse_navall(_NAVALL)
+
+    report = analyse_portfolio(
+        config,
+        orphan + held,
+        valuation_date=date(2024, 7, 5),
+        equity_prices={},
+        nav=nav,
+    )
+
+    # The exited orphan is a closed position, not a join error.
+    assert report.held_unconfigured == ()
+    assert len(report.closed_positions) == 1
+    closed = report.closed_positions[0]
+    assert "Quantum" in closed.identifier
+    assert closed.trades == 2
+    assert closed.realised_gain == Decimal("600")  # 100*(26-20)
+    assert closed.xirr_pct is not None and closed.xirr_pct > 0  # +30% over 2y
+    # It does not block the run.
+    raise_for_join_errors(report)
+    # Its cashflows count toward a real portfolio XIRR (not withheld).
+    assert report.xirr_incomplete is False
+    assert report.xirr_pct is not None
+
+
+def test_closed_config_holding_keeps_real_xirr() -> None:
+    """A configured holding fully exited keeps a real XIRR and does not block."""
     config = PortfolioConfig(
         holdings=(_mf_holding("PPFCF", "Parag Parikh Flexi Cap Fund"),)
     )
@@ -122,10 +170,11 @@ def test_fully_joined_but_zero_units_is_flagged() -> None:
         config, txns, valuation_date=date(2024, 7, 5), equity_prices={}, nav=nav
     )
 
-    assert report.holdings[0].matched_txns == 2
-    assert report.holdings[0].units == Decimal("0")
-    assert "PPFCF" in report.join_errors
-    assert report.xirr_incomplete is True and report.xirr_pct is None
+    holding = report.holdings[0]
+    assert holding.matched_txns == 2 and holding.units == Decimal("0")
+    assert report.xirr_incomplete is False  # fully-exited cashflows are complete
+    assert report.xirr_pct is not None  # a real, computable rate
+    raise_for_join_errors(report)  # not an error
 
 
 # -- Clamped bound never surfaced (BUG B) ----------------------------------
