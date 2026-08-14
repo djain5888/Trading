@@ -47,6 +47,9 @@ class HoldingReport(BaseModel):
     matched_code: str | None = Field(
         default=None, description="Resolved AMFI scheme code (MF holdings)."
     )
+    matched_txns: int = Field(
+        default=0, description="Transactions joined to this holding."
+    )
 
 
 class SleeveReport(BaseModel):
@@ -114,6 +117,15 @@ class PortfolioReport(BaseModel):
     )
     unmatched_schemes: tuple[str, ...] = Field(
         default=(), description="MF holdings that could not be matched to an AMFI code."
+    )
+    zero_txn_holdings: tuple[str, ...] = Field(
+        default=(), description="MF holdings that matched zero transactions."
+    )
+    unmatched_transactions: tuple[str, ...] = Field(
+        default=(), description="Transaction schemes that matched no holding."
+    )
+    join_errors: tuple[str, ...] = Field(
+        default=(), description="Holdings with transactions but zero resolved units."
     )
     mismatches: tuple[HoldingMismatch, ...] = Field(
         default=(), description="Broker cross-check discrepancies."

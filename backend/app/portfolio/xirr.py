@@ -97,10 +97,24 @@ def xirr(flows: Sequence[tuple[date, float]], *, guess: float = 0.1) -> float | 
     # the exponents) stay as small as possible.
     origin = min(when for when, _ in flows)
 
-    newton = _newton(flows, origin, guess)
-    if newton is not None:
-        return newton
-    return _bisect(flows, origin)
+    result = _newton(flows, origin, guess)
+    if result is None:
+        result = _bisect(flows, origin)
+    return _reject_clamped(result)
+
+
+def _reject_clamped(rate: float | None) -> float | None:
+    """Convert a solution pinned to a domain bound into ``None``.
+
+    A rate resting on ``_RATE_LOW``/``_RATE_HIGH`` is a boundary artefact of a
+    non-converging solve, not a real internal rate of return — surfacing it (the
+    +10000% bug) would be worse than admitting the XIRR is undefined.
+    """
+    if rate is None:
+        return None
+    if rate >= _RATE_HIGH - 1e-6 or rate <= _RATE_LOW + 1e-6:
+        return None
+    return rate
 
 
 def _newton(

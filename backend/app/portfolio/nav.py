@@ -67,6 +67,18 @@ def scheme_name_tokens(name: str) -> frozenset[str]:
     )
 
 
+def name_jaccard(left: str, right: str) -> float:
+    """Return the normalised-token Jaccard similarity of two scheme names.
+
+    Uses the same normalisation as AMFI matching so the transaction↔holding join
+    and the holding↔NAV match agree on what counts as "the same scheme".
+    """
+    a = scheme_name_tokens(left)
+    b = scheme_name_tokens(right)
+    union = len(a | b)
+    return len(a & b) / union if union else 0.0
+
+
 def _variant_rank(entry: NavEntry) -> tuple[int, str]:
     """Deterministic preference among equal-scoring variants (Direct Growth first)."""
     raw = entry.name.lower()

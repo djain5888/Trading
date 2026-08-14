@@ -114,6 +114,24 @@ def render_portfolio(report: PortfolioReport) -> str:
             f"round trips with no elapsed time): {', '.join(na_xirr) or 'portfolio'}"
         )
 
+    if report.zero_txn_holdings:
+        lines.append("")
+        lines.append(
+            "JOIN ERROR — MF holdings with ZERO matched transactions "
+            f"(check scheme names / scheme_code): {', '.join(report.zero_txn_holdings)}"
+        )
+    if report.unmatched_transactions:
+        lines.append("")
+        lines.append(
+            "JOIN ERROR — transactions matching no holding: "
+            f"{', '.join(report.unmatched_transactions)}"
+        )
+    if report.join_errors:
+        lines.append("")
+        lines.append(
+            "JOIN ERROR — holdings with transactions but zero units: "
+            f"{', '.join(report.join_errors)}"
+        )
     if report.unmatched_schemes:
         lines.append("")
         lines.append(

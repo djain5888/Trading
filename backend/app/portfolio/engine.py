@@ -12,6 +12,7 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal
 
+from app.core.logging import get_logger
 from app.portfolio.models import (
     AssetType,
     Holding,
@@ -20,7 +21,12 @@ from app.portfolio.models import (
     Transaction,
     TxnType,
 )
-from app.portfolio.nav import NavEntry, NavSnapshot
+from app.portfolio.nav import (
+    DEFAULT_NAME_MATCH_THRESHOLD,
+    NavEntry,
+    NavSnapshot,
+    name_jaccard,
+)
 from app.portfolio.prices import HoldingMismatch, cross_check_holdings
 from app.portfolio.report import (
     AssetClassReport,
@@ -31,6 +37,8 @@ from app.portfolio.report import (
 )
 from app.portfolio.tax import TaxConfig, build_lots, exit_tax, holding_tax
 from app.portfolio.xirr import absolute_return_pct, cashflows_from, xirr
+
+logger = get_logger(__name__)
 
 #: How many of the weakest holdings to name as return "drags".
 _MAX_DRAGS = 3
@@ -53,7 +61,7 @@ def analyse_portfolio(
 ) -> PortfolioReport:
     """Measure the portfolio and return a :class:`PortfolioReport`."""
     taxes = tax_config or TaxConfig()
-    grouped = _group(transactions)
+    per_holding, unmatched_txns = _assign_transactions(config, transactions)
 
     holding_reports: list[HoldingReport] = []
     unpriced: list[str] = []
@@ -61,12 +69,19 @@ def analyse_portfolio(
     imported_units: dict[str, Decimal] = {}
 
     for holding in config.holdings:
-        txns = grouped.get(holding.key, [])
+        txns = per_holding[holding.key]
         price, matched_code = _price_for(holding, equity_prices, nav)
         report = _analyse_holding(
             holding, txns, valuation_date, price, matched_code, taxes
         )
         holding_reports.append(report)
+        logger.info(
+            "Holding %s (%s): %d transaction(s) joined, %s units.",
+            holding.identifier,
+            holding.asset_type.value,
+            len(txns),
+            report.units,
+        )
         if not report.priced and report.units > 0:
             unpriced.append(holding.identifier)
             # An MF with a NAV file loaded but no resolvable code is a config
@@ -76,18 +91,32 @@ def analyse_portfolio(
         if holding.asset_type is AssetType.EQUITY and report.units > 0:
             imported_units[holding.identifier] = report.units
 
+    # Join-integrity checks (BUG A/B).
+    zero_txn = [
+        h.identifier
+        for h in config.holdings
+        if h.asset_type is AssetType.MF and not per_holding[h.key]
+    ]
+    unmatched_tx_labels = sorted({(t.name or t.identifier) for t in unmatched_txns})
+    join_errors = [
+        h.identifier for h in holding_reports if h.matched_txns > 0 and h.units == 0
+    ]
+    for identifier in zero_txn:
+        logger.error("MF holding %s matched ZERO transactions.", identifier)
+
     total_value = sum((h.market_value for h in holding_reports), Decimal(0))
     mismatches = _cross_check(imported_units, broker_units)
 
     sleeves = _sleeve_reports(
-        config, holding_reports, grouped, valuation_date, total_value
+        config, holding_reports, per_holding, valuation_date, total_value
     )
-    asset_classes = _asset_class_reports(holding_reports, grouped, valuation_date)
-    portfolio_incomplete = _has_unpriced(holding_reports)
+    asset_classes = _asset_class_reports(holding_reports, per_holding, valuation_date)
+    portfolio_incomplete = _aggregate_blocked(holding_reports)
+    matched = [txn for txns in per_holding.values() for txn in txns]
     portfolio_xirr = (
         None
         if portfolio_incomplete
-        else _aggregate_xirr(transactions, total_value, valuation_date)
+        else _aggregate_xirr(matched, total_value, valuation_date)
     )
 
     return _build_report(
@@ -101,18 +130,71 @@ def analyse_portfolio(
         asset_classes=asset_classes,
         unpriced=unpriced,
         unmatched=unmatched,
+        zero_txn=zero_txn,
+        unmatched_transactions=unmatched_tx_labels,
+        join_errors=join_errors,
         mismatches=mismatches,
     )
 
 
-def _group(
-    transactions: Sequence[Transaction],
-) -> dict[tuple[AssetType, str], list[Transaction]]:
-    """Group transactions by holding key."""
-    grouped: dict[tuple[AssetType, str], list[Transaction]] = {}
+def _assign_transactions(
+    config: PortfolioConfig, transactions: Sequence[Transaction]
+) -> tuple[dict[tuple[AssetType, str], list[Transaction]], list[Transaction]]:
+    """Join transactions to holdings; return per-holding lists and the orphans.
+
+    Equities join on the ticker; MF transactions join on the *normalised* scheme
+    name (the same normalisation used for AMFI matching), with an explicit
+    ``scheme_code`` override taking precedence — because the CAS scheme-code
+    column is often blank and the names differ in punctuation/suffixes between
+    the statement and ``portfolio.json`` (BUG A).
+    """
+    per_holding: dict[tuple[AssetType, str], list[Transaction]] = {
+        h.key: [] for h in config.holdings
+    }
+    equity_by_id = {
+        h.identifier.upper(): h
+        for h in config.holdings
+        if h.asset_type is AssetType.EQUITY
+    }
+    mf_holdings = [h for h in config.holdings if h.asset_type is AssetType.MF]
+    orphans: list[Transaction] = []
     for txn in transactions:
-        grouped.setdefault(txn.key, []).append(txn)
-    return grouped
+        if txn.asset_type is AssetType.EQUITY:
+            holding = equity_by_id.get(txn.identifier.strip().upper())
+        else:
+            holding = _match_mf_holding(txn, mf_holdings)
+        if holding is None:
+            orphans.append(txn)
+        else:
+            per_holding[holding.key].append(txn)
+    return per_holding, orphans
+
+
+def _match_mf_holding(
+    txn: Transaction, mf_holdings: Sequence[Holding]
+) -> Holding | None:
+    """Match one MF transaction to a holding by scheme_code or normalised name."""
+    for holding in mf_holdings:
+        if (
+            holding.scheme_code
+            and txn.identifier.strip() == holding.scheme_code.strip()
+        ):
+            return holding
+    txn_names = [name for name in (txn.identifier, txn.name) if name]
+    best: Holding | None = None
+    best_score = 0.0
+    for holding in mf_holdings:
+        candidates = [holding.identifier, holding.name]
+        if holding.scheme_code:
+            candidates.append(holding.scheme_code)
+        score = max(
+            name_jaccard(txn_name, candidate)
+            for txn_name in txn_names
+            for candidate in candidates
+        )
+        if score > best_score + 1e-9:
+            best_score, best = score, holding
+    return best if best_score >= DEFAULT_NAME_MATCH_THRESHOLD else None
 
 
 def _price_for(
@@ -148,9 +230,17 @@ def _resolve_mf(holding: Holding, nav: NavSnapshot) -> NavEntry | None:
     return nav.match_by_name(holding.name) or nav.match_by_name(holding.identifier)
 
 
-def _has_unpriced(holding_reports: Sequence[HoldingReport]) -> bool:
-    """Return whether any held (units > 0) holding lacks a valuation price."""
-    return any(not r.priced and r.units > 0 for r in holding_reports)
+def _aggregate_blocked(holding_reports: Sequence[HoldingReport]) -> bool:
+    """Return whether an aggregate's XIRR must be withheld.
+
+    True when any member is either held-but-unpriced (no valuation price) or a
+    join error (transactions present but zero resolved units) — in both cases a
+    computed XIRR would be garbage, so it is reported as n/a (BUG B).
+    """
+    return any(
+        (r.units > 0 and not r.priced) or (r.matched_txns > 0 and r.units == 0)
+        for r in holding_reports
+    )
 
 
 def _analyse_holding(
@@ -183,9 +273,10 @@ def _analyse_holding(
         ).total_tax
     else:
         etax = Decimal(0)
-    # An unpriced holding that still holds units has no meaningful terminal
-    # value, so its XIRR would be garbage — withhold it (BUG 2).
-    if not priced and units > 0:
+    # A held-but-unpriced holding, or one with transactions but no resolved
+    # units (a join error), has no meaningful terminal value — withhold its
+    # XIRR rather than compute garbage (BUG B).
+    if (not priced and units > 0) or (len(txns) > 0 and units == 0):
         xirr_rate = None
     else:
         xirr_rate = xirr(
@@ -223,6 +314,7 @@ def _analyse_holding(
         exit_tax=etax,
         priced=priced,
         matched_code=matched_code,
+        matched_txns=len(txns),
     )
 
 
@@ -253,7 +345,7 @@ def _sleeve_reports(
         for holding in members:
             txns.extend(grouped.get(holding.key, []))
         actual = float(value / total_value * 100) if total_value > 0 else 0.0
-        incomplete = _has_unpriced(sleeve_reports)
+        incomplete = _aggregate_blocked(sleeve_reports)
         reports.append(
             SleeveReport(
                 sleeve=sleeve,
@@ -286,7 +378,7 @@ def _asset_class_reports(
         ]
         if not txns:
             continue
-        incomplete = _has_unpriced(members)
+        incomplete = _aggregate_blocked(members)
         reports.append(
             AssetClassReport(
                 asset_type=asset_type,
@@ -342,6 +434,9 @@ def _build_report(
     asset_classes: tuple[AssetClassReport, ...],
     unpriced: Sequence[str],
     unmatched: Sequence[str],
+    zero_txn: Sequence[str],
+    unmatched_transactions: Sequence[str],
+    join_errors: Sequence[str],
     mismatches: tuple[HoldingMismatch, ...],
 ) -> PortfolioReport:
     """Assemble the top-level portfolio report from the parts."""
@@ -389,8 +484,39 @@ def _build_report(
         holdings=tuple(holding_reports),
         unpriced=tuple(unpriced),
         unmatched_schemes=tuple(unmatched),
+        zero_txn_holdings=tuple(zero_txn),
+        unmatched_transactions=tuple(unmatched_transactions),
+        join_errors=tuple(join_errors),
         mismatches=mismatches,
     )
+
+
+def raise_for_join_errors(report: PortfolioReport) -> None:
+    """Fail loudly on transaction↔holding join failures (BUG A).
+
+    Raises if any MF holding matched zero transactions, or any transaction's
+    scheme matched no holding — both mean the statement and ``portfolio.json``
+    disagree on scheme identity and the numbers cannot be trusted.
+
+    Raises:
+        ValueError: If there are unjoined holdings or transactions.
+    """
+    problems: list[str] = []
+    if report.zero_txn_holdings:
+        problems.append(
+            "MF holdings with ZERO matched transactions: "
+            + ", ".join(report.zero_txn_holdings)
+        )
+    if report.unmatched_transactions:
+        problems.append(
+            "transactions matching no holding: "
+            + ", ".join(report.unmatched_transactions)
+        )
+    if problems:
+        raise ValueError(
+            "Transaction join failed — fix scheme names in portfolio.json or add "
+            "explicit scheme_code. " + "; ".join(problems)
+        )
 
 
 def raise_for_unmatched(report: PortfolioReport) -> None:
